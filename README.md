@@ -36,9 +36,9 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat, regi
 
 ---
 
-## Feature Matrix: Upstream `pyDINEOF` vs. Canonical Fortran
+## Feature Matrix: Upstream pyDINEOF vs. Canonical Fortran
 
-| Component | Fortran DINEOF (GHER Reference) | Upstream `pyDINEOF` | DINEOF-HPC (This Implementation) |
+| Component | Fortran DINEOF (GHER Reference) | Upstream pyDINEOF | DINEOF-HPC (This Implementation) |
 | :--- | :--- | :--- | :--- |
 | **Spectral Solver** | Iterative restarted Lanczos via ARPACK (`dsaupd`/`dseupd`). | Iterative restarted Lanczos via `scipy.sparse.linalg.eigsh`. | Dense Hermitian eigensolver (`scipy.linalg.eigh`) with dynamic crossover to Lanczos / Randomized SVD - see [Performance Benchmarks](#performance-benchmarks-vs-canonical-fortran). |
 | **Memory & Iterative Update** | BLAS matrix-vector operations on 1D ocean coordinate vectors. | Explicit spatial mode computation $U = A V \Sigma^{-1}$, followed by dense $U \Sigma V^T$ allocation. | Sequential in-place spatial chunking with multi-threaded Numba JIT kernels - see [Implementation Details](#implementation-details). |
@@ -46,7 +46,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat, regi
 | **Missing Data Indexing** | 1D index arrays of ocean points and gaps. | Global coordinate tuples via `np.isnan(X).nonzero()`. | Boolean masking combined with chunked BLAS projections (1 byte per spatiotemporal element). |
 | **Temporal Diffusion Filter** | Discrete Laplacian diffusion with uniform step increments (`dindiff.f`). | Discrete diffusion with time delta in seconds cast to `uint16`. | Unconditionally stable 1D implicit diffusion (Thomas algorithm) - see [§1](#1-unconditionally-stable-1d-implicit-temporal-diffusion). |
 | **Cross-Validation Sampling** | Cloud mask files or uniform random points. | Stochastic sampling of isolated pixels (`numpy.random.choice`). | Spatial patch hold-out ($L \times L$ blocks) - see [§2](#2-spatial-patch-hold-out--pooled-rmse). |
-| **CV Sample Sizing** | User-defined parameter. | Continuous formula: $\min(0.01 MN + 40,\ 0.03 MN)$. | Adaptive sizing with an upper ceiling (`cv_max_points`, default $5{\times}10^5$), preventing extraction bottlenecks on rasters with $MN > 10^9$. |
+| **CV Sample Sizing** | User-defined parameter. | Continuous formula: $\min(0.01 M N + 40, 0.03 M N)$. | Adaptive sizing with an upper ceiling (`cv_max_points`, default $5 \times 10^5$), preventing extraction bottlenecks on rasters with $M N > 10^9$. |
 | **Post-Validation Convergence** | Restores CV points and iterates until `toliter`. | Restores CV points and iterates until `toliter`. | Protocol maintained; out-of-sample predictions frozen at $k_{\text{opt}}$ before the final pass, preventing leakage. Optimal state cached on disk via `memmap`. |
 | **Uncertainty Estimation (OI)** | Companion routine (`dineof_error.f90`). | Not implemented. | Analytical reduced-subspace OI analysis error - see [§3](#3-in-stream-optimal-interpolation-oi-analysis-error). |
 | **Log-Normal Error Derivation** | Not implemented. | Not implemented. | Exact analytical formulation - see [§4](#4-exact-analytical-physical-error-for-log-normal-distributions). |
@@ -57,24 +57,28 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat, regi
 
 ## Performance Benchmarks vs. Canonical Fortran
 
-Canonical Fortran DINEOF (GHER reference) remains standard for coarse-to-moderate oceanographic grids, but hits two ceilings on modern high-resolution remote sensing series: standard `INTEGER*4` indexing caps arrays at $2^{31}-1 \approx 2.14{\times}10^9$ elements, and dense allocation of spatial mode matrices does not scale past $10^7$ pixels. DINEOF-HPC uses 64-bit addressing with chunked in-place updates ($m \ll M$), bounding peak RAM to $\mathcal{O}(m \cdot N + m \cdot k)$ regardless of grid size.
+Canonical Fortran DINEOF (GHER reference) remains standard for coarse-to-moderate oceanographic grids, but hits two ceilings on modern high-resolution remote sensing series: standard `INTEGER*4` indexing caps arrays at $2^{31}-1 \approx 2.14 \times 10^9$ elements, and dense allocation of spatial mode matrices does not scale past $10^7$ pixels. DINEOF-HPC uses 64-bit addressing with chunked in-place updates ($m \ll M$), bounding peak RAM to $\mathcal{O}(m \cdot N + m \cdot k)$ regardless of grid size.
 
-Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 threads, 512 GB RAM) on a regional grid (~$6{\times}10^7$ active water pixels, 200+ dates):
+Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 threads, 512 GB RAM) on a regional grid (~$6 \times 10^7$ active water pixels, 200+ dates):
 
 | Processing Phase | Canonical Fortran DINEOF (GHER) | DINEOF-HPC | Architectural Factor |
 | :--- | :--- | :--- | :--- |
-| **Max Indexable Elements** | Bounded to $< 2.14{\times}10^9$ (`INTEGER*4`) | **Unbounded** (64-bit + chunking) | Native processing of $10^7$–$10^8$ marine pixels |
-| **Covariance Step ($A^T A$)** | Dense full-grid product (~35.0 s/iter) | Precomputed subsampling (~5.3 s/iter) | **~6.6× faster**, $10^{-5}$ spectral equivalence |
+| **Max Indexable Elements** | Bounded to $< 2.14 \times 10^9$ (`INTEGER*4`) | **Unbounded** (64-bit + chunking) | Native processing of $10^7$ to $10^8$ marine pixels |
+| **Covariance Step ($A^T A$)** | Dense full-grid product (~35.0 s/iter) | Precomputed subsampling (~5.3 s/iter) | **~6.6x faster**, $10^{-5}$ spectral equivalence |
 | **Missing Value Update** | OpenMP loops over 1D arrays (~3.8 s/iter) | Numba JIT parallel kernel (~3.35 s/iter) | Cache-aligned L3 streaming, zero 2D scatter penalties |
-| **Leading Mode Iteration** | ~39.5 s/iteration | **~11.2 s/iteration** | **~3.5× speedup** |
-| **OI Error Estimation** | Detached binary, full disk re-read (~45–60 min) | In-stream during NetCDF export (~15 min) | Eliminates 50+ GB redundant I/O passes |
-| **Full Pipeline (~15 modes)** | **~5h 25min** (projected) | **~1h 35min** (measured) | **~3.5× end-to-end acceleration** |
+| **Leading Mode Iteration** | ~39.5 s/iteration | **~11.2 s/iteration** | **~3.5x speedup** |
+| **OI Error Estimation** | Detached binary, full disk re-read (~45-60 min) | In-stream during NetCDF export (~15 min) | Eliminates 50+ GB redundant I/O passes |
+| **Full Pipeline (~15 modes)** | **~5h 25min** (projected) | **~1h 35min** (measured) | **~3.5x end-to-end acceleration** |
 
 ![Spectral Solver Crossover and Acceleration Frontier](Optional/fig_01_spectral_crossover.png)
 
 *Figure: Runtime scaling across temporal dimension $N$ and truncation rank $k$, showing the empirical crossover boundary $N^*(k)$ where Lanczos outperforms dense LAPACK.*
 
-**Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^T A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^3)$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^2)$, with convergence governed by the relative eigengap under the Kaniel-Paige-Saad theorem. `'auto'` applies the empirical crossover $N^*(k) \approx \max(70,\ 10k)$: dense LAPACK below this threshold (avoiding Krylov restart overhead), Lanczos/Randomized SVD above it (substantial gains for $N > 500$).
+**Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^T A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^3)$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^2)$, with convergence governed by the relative eigengap under the Kaniel-Paige-Saad theorem. `'auto'` applies the empirical crossover:
+
+$$N^*(k) \approx \max(70, 10k)$$
+
+Dense LAPACK is selected below this threshold (avoiding Krylov restart overhead), and Lanczos/Randomized SVD above it (substantial gains for $N > 500$).
 
 **Key drivers of the speedup:**
 1. **Precomputed covariance subsampling** - spatial subsampling indices are frozen once at startup rather than redrawn every iteration, cutting covariance FLOPs and memory traffic by up to an order of magnitude without compromising leading-EOF accuracy.
@@ -88,31 +92,48 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 The five formulations below are DINEOF-HPC's genuine methodological additions beyond canonical DINEOF and `pyDINEOF`. Implementation-only changes (chunked projection, progressive initialization, observation-preservation modes, automatic rank search) are covered more briefly in [Implementation Details](#implementation-details).
 
 ### 1. Unconditionally Stable 1D Implicit Temporal Diffusion
-To filter temporal covariance matrices over irregular observation dates without CFL time-step clamping, an implicit backward Euler formulation is solved via the Thomas algorithm: $(I - \alpha L) B^{n+1} = B^n$.
+To filter temporal covariance matrices over irregular observation dates without CFL time-step clamping, an implicit backward Euler formulation is solved via the Thomas algorithm:
+
+$$(I - \alpha L) B^{n+1} = B^n$$
 
 Using variable intervals $\Delta t_i = t_{i+1} - t_i$, cell widths use half-cell boundaries ($\Delta t_{e,0} = 0.5\Delta t_0$, $\Delta t_{e,N-1} = 0.5\Delta t_{N-2}$, $\Delta t_{e,i} = 0.5(\Delta t_{i-1}+\Delta t_i)$ elsewhere). Symmetrization $\tilde{B}_{\text{sym}} = 0.5(\tilde{B}+\tilde{B}^T)$ guarantees self-adjointness.
 
 ### 2. Spatial Patch Hold-out & Pooled RMSE
-Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE: $\text{RMSE}_{\text{CV}}(k) = \sqrt{\frac{1}{N_{\text{eval}}} \sum_{f=1}^K \sum_{i \in \text{patch}_f} \left(X_a(i) - X_o(i)\right)^2}$.
+Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE:
+
+$$\text{RMSE}_{\text{CV}}(k) = \sqrt{\frac{1}{N_{\text{eval}}} \sum_{f=1}^K \sum_{i \in \text{patch}_f} \left(X_a(i) - X_o(i)\right)^2}$$
 
 Out-of-sample predictions are frozen at $k_{\text{opt}}$ prior to the final convergence pass with restored observations, preventing validation data leakage.
 
 ### 3. In-Stream Optimal Interpolation (OI) Analysis Error
-Following Beckers et al. (2006), analysis error variance is calculated in the reduced EOF subspace ($k \times k$) rather than in spatial coordinates ($M \times M$): $A_t = \Lambda_k^{-1} + \frac{1}{\sigma_o^2} U_{\text{obs},t}^T U_{\text{obs},t}$.
+Following Beckers et al. (2006), analysis error variance is calculated in the reduced EOF subspace ($k \times k$) rather than in spatial coordinates ($M \times M$):
 
-where $\Lambda_k = \frac{1}{N}\text{diag}(s_1^2,\dots,s_k^2)$ and $\sigma_o = \text{RMSE}_{\text{CV}}(k_{\text{opt}})$. The stationary background variance diagonal is precomputed once: $[B]_{mm} = \sum_{i=1}^k \lambda_i (U_k)_{mi}^2$.
+$$A_t = \Lambda_k^{-1} + \frac{1}{\sigma_o^2} U_{\text{obs},t}^T U_{\text{obs},t}$$
 
-During NetCDF export, local error variance and relative error ratio are evaluated on the fly: $[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj}$, and $r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0,1]$.
+where $\Lambda_k = \frac{1}{N}\text{diag}(s_1^2,\dots,s_k^2)$ and $\sigma_o = \text{RMSE}_{\text{CV}}(k_{\text{opt}})$. The stationary background variance diagonal is precomputed once:
+
+$$[B]_{mm} = \sum_{i=1}^k \lambda_i (U_k)_{mi}^2$$
+
+During NetCDF export, local error variance and relative error ratio are evaluated on the fly:
+
+$$[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj}, \qquad r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0, 1]$$
 
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
-For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu,\sigma_{\ln}^2)$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact identity: $\sigma_{\text{phys}}(m,t) = X_{\text{rec}}(m,t) \cdot \exp\left(\frac{[P_t]_{mm}}{2}\right)\sqrt{\exp\left([P_t]_{mm}\right)-1}$.
+For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu,\sigma_{\ln}^2)$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact identity:
+
+$$\sigma_{\text{phys}}(m,t) = X_{\text{rec}}(m,t) \cdot \exp\left(\frac{[P_t]_{mm}}{2}\right)\sqrt{\exp\left([P_t]_{mm}\right)-1}$$
 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
 Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) = [P_t]_{mm} / [B]_{mm} \in [0, 1]$:
 
-* **Linear scale (`apply_log=False`)**: $Y_{\text{final}}(m,t) = Y_{\text{rec}}(m,t) + r_t(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m,t)\right)\right) - Y_{\text{rec}}(m,t)\right]$.
+* **Linear scale (`apply_log=False`)**:
+  $$Y_{\text{final}}(m,t) = Y_{\text{rec}}(m,t) + r_t(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m,t)\right)\right) - Y_{\text{rec}}(m,t)\right]$$
 
-* **Logarithmic scale (`apply_log=True`)**: The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion: $\ln\left(Y_{\text{final}}(m,t)\right) = \ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)$ and $Y_{\text{final}}(m,t) = \exp\left(\ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)\right)$, where $\Delta_{\text{qmap},\ln} = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}\right)\right) - \ln Y_{\text{rec}}$.
+* **Logarithmic scale (`apply_log=True`)**:
+  The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion:
+  $$\ln\left(Y_{\text{final}}(m,t)\right) = \ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)$$
+  $$Y_{\text{final}}(m,t) = \exp\left(\ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)\right)$$
+  where $\Delta_{\text{qmap},\ln}(m,t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}(m,t)\right)\right) - \ln Y_{\text{rec}}(m,t)$.
 
 * **Data-leakage-free calibration**: Transfer functions are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
 * **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If $\text{KGE}_{\text{QMap}} < \text{KGE}_{\text{raw}}$, quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
@@ -122,13 +143,18 @@ Variance attenuation in unconstrained cloudy areas is corrected via Quantile Map
 
 ## Implementation Details
 
-* **Chunked spatial projection.** Since $U = AV\Sigma^{-1}$, reconstruction satisfies $U\Sigma V^T = AVV^T$. DINEOF-HPC evaluates this sequentially across spatial slices ($X_{\text{chunk}} = A_{\text{chunk}} V_k V_k^T$, $m \ll M$) via a multi-threaded Numba JIT kernel (`prange`), never allocating the full $U \in \mathbb{R}^{M \times k}$ and updating only missing coordinates.
+* **Chunked spatial projection.** Since $U = A V \Sigma^{-1}$, reconstruction satisfies the algebraic identity:
+  $$U \Sigma V^T = (A V \Sigma^{-1}) \Sigma V^T = A V V^T$$
+  DINEOF-HPC evaluates this sequentially across spatial slices ($m \ll M$) directly in place:
+  $$X_{\text{chunk}} = A_{\text{chunk}} V_k V_k^T$$
+  via a multi-threaded Numba JIT kernel (`prange`), never allocating the full $U \in \mathbb{R}^{M \times k}$ and updating only missing coordinates.
 * **Progressive mode initialization.** To prevent unconverged higher modes from injecting high-frequency noise into gaps, iterations start strictly at $k=1$; each successive mode is initialized from the converged state of the preceding rank.
 * **Observation preservation vs. spatial continuum.** `keep_observations=True` retains observed pixels unchanged (strict gap-filling; may show a gradient seam at cloud edges due to raw sensor noise vs. low-rank smoothing). `keep_observations=False` returns the full continuous projection $\sum_{k=1}^{k_{\text{opt}}} u_k s_k v_k^T$, filtering noise everywhere for seamless gradients - useful for hydrodynamic front detection.
 
   ![Raw_VS_KeepOBS_VS_DumpOBS](Optional/benchmark_reconstruction_3y.gif)
 
-* **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$: $\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3,\ 6,\ 30)$.
+* **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$:
+  $$\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3,\ 6,\ 30)$$
 
 ---
 
@@ -200,7 +226,7 @@ dineof_hpc/
 
 ```bash
 # Clone the repository
-git clone https://github.com/Julien-res/dineof_hpc.git
+git clone [https://github.com/Julien-res/dineof_hpc.git](https://github.com/Julien-res/dineof_hpc.git)
 cd dineof_hpc
 
 # Create conda environment
