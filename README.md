@@ -42,7 +42,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat, regi
 | :--- | :--- | :--- | :--- |
 | **Spectral Solver** | Iterative restarted Lanczos via ARPACK (`dsaupd`/`dseupd`). | Iterative restarted Lanczos via `scipy.sparse.linalg.eigsh`. | Dense Hermitian eigensolver (`scipy.linalg.eigh`) with dynamic crossover to Lanczos / Randomized SVD - see [Performance Benchmarks](#performance-benchmarks-vs-canonical-fortran). |
 | **Memory & Iterative Update** | BLAS matrix-vector operations on 1D ocean coordinate vectors. | Explicit spatial mode computation $U = A V \Sigma^{-1}$, followed by dense $U \Sigma V^{T}$ allocation. | Sequential in-place spatial chunking with multi-threaded Numba JIT kernels - see [Implementation Details](#implementation-details). |
-| **Covariance Construction** | Direct matrix products. | Full matrix multiplication $A^{T} A$ (`np.dot`). | BLAS-3 symmetric rank-$k$ update (`ssyrk`) with precomputed, frozen spatial subsampling indices. |
+| **Covariance Construction** | Direct matrix products. | Full matrix multiplication $A^{T} A$ (`np.dot`). | Matrix product $A^{T} A$ (`np.matmul`) with precomputed, frozen spatial subsampling indices. |
 | **Missing Data Indexing** | 1D index arrays of ocean points and gaps. | Global coordinate tuples via `np.isnan(X).nonzero()`. | Boolean masking combined with chunked BLAS projections (1 byte per spatiotemporal element). |
 | **Temporal Diffusion Filter** | Discrete Laplacian diffusion with uniform step increments (`dindiff.f`). | Discrete diffusion with time delta in seconds cast to `uint16`. | Unconditionally stable 1D implicit diffusion (Thomas algorithm) - see [§1](#1-unconditionally-stable-1d-implicit-temporal-diffusion). |
 | **Cross-Validation Sampling** | Cloud mask files or uniform random points. | Stochastic sampling of isolated pixels (`numpy.random.choice`). | Spatial patch hold-out ($L \times L$ blocks) - see [§2](#2-spatial-patch-hold-out--pooled-rmse). |
@@ -119,9 +119,13 @@ During NetCDF export, local error variance and relative error ratio are evaluate
 $$[P_{t}]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_{k})_{mi} [A_{t}^{-1}]_{ij} (U_{k})_{mj}, \qquad r_{t}(m) = \frac{[P_{t}]_{mm}}{[B]_{mm}} \in [0, 1]$$
 
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
-For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu, \sigma_{\ln}^{2})$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact identity:
+For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu, \sigma_{\ln}^{2})$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact analytical identity:
 
-$$\sigma_{\text{phys}}(m, t) = X_{\text{rec}}(m, t) \cdot \exp\left(\frac{[P_{t}]_{mm}}{2}\right) \sqrt{\exp\left([P_{t}]_{mm}\right) - 1}$$
+$$\sigma_{\text{phys}}(m, t) = X_{\text{rec}}(m, t) \cdot \exp\left(\frac{\sigma_{\ln}^{2}(m, t)}{2}\right) \sqrt{\exp\left(\sigma_{\ln}^{2}(m, t)\right) - 1}$$
+
+where the log-space error variance is scaled by the observational noise variance and the relative analysis error ratio:
+
+$$\sigma_{\ln}^{2}(m, t) = \sigma_{o}^{2} \cdot r_{t}(m) = \sigma_{o}^{2} \cdot \frac{[P_{t}]_{mm}}{[B]_{mm}}$$
 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
 Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_{t}(m) = [P_{t}]_{mm} / [B]_{mm} \in [0, 1]$:
@@ -207,7 +211,7 @@ dineof_hpc/
        +-------------------------------------------------------------+
        | 1. Disjoint 2D patch selection (select_cv_blocks_multi)     |
        | 2. Automatic rank search (_estimate_nev)                    |
-       | 3. Progressive SVD updates (ssyrk + LAPACK/ARPACK crossover)|
+       | 3. Progressive SVD updates                                  |
        | 4. Out-of-sample RMSE convergence & early stopping          |
        | 5. Final full-field restoration (keep_obs=True/False)       |
        +-------------------------------------------------------------+
@@ -237,7 +241,7 @@ dineof_hpc/
 
 ```bash
 # Clone the repository
-git clone [https://github.com/Julien-res/dineof_hpc.git](https://github.com/Julien-res/dineof_hpc.git)
+git clone https://github.com/Julien-res/dineof_hpc.git
 cd dineof_hpc
 
 # Create conda environment

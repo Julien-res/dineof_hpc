@@ -295,7 +295,7 @@ def _ssvd_spectral(
     compute_u: bool = True,
     idx_sub: NDArray[np.int64] | None = None,
     scale: float = 1.0,
-    solver: str = 'dense',
+    solver: str = 'auto',
     seed: int | None = 42
 ) -> tuple[NDArray[np.float32] | None, NDArray[np.float32], NDArray[np.float32]]:
     """Compute leading EOF modes from the temporal covariance matrix.

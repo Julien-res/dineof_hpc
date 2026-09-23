@@ -548,7 +548,7 @@ def run_reconstruction_pipeline(
     apply_qmap: bool = True,
     qmap_nb_quantiles: int = 100,
     use_disk: bool = False,
-    solver: str = 'dense',
+    solver: str = 'auto',
     dineof_kwargs: dict | None = None
 ):
     """Run the complete NetCDF-to-diagnostics reconstruction workflow.
