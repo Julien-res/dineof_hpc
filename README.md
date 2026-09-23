@@ -374,11 +374,6 @@ run_reconstruction_pipeline(
 On multi-socket architectures, distribute memory allocations across all NUMA channels:
 
 ```bash
-#!/bin/bash
-#OAR -l /core=96,walltime=24:00:00
-#OAR -q default
-#OAR -n DINEOF_PRODUCTION
-
 # Configure OpenMP, BLAS, and Numba thread pools
 export OMP_NUM_THREADS=96
 export MKL_NUM_THREADS=96
