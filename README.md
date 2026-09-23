@@ -88,62 +88,31 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 The five formulations below are DINEOF-HPC's genuine methodological additions beyond canonical DINEOF and `pyDINEOF`. Implementation-only changes (chunked projection, progressive initialization, observation-preservation modes, automatic rank search) are covered more briefly in [Implementation Details](#implementation-details).
 
 ### 1. Unconditionally Stable 1D Implicit Temporal Diffusion
-To filter temporal covariance matrices over irregular observation dates without CFL time-step clamping, an implicit backward Euler formulation is solved via the Thomas algorithm:
-```math
-(I - \alpha L) B^{n+1} = B^n
-```
+To filter temporal covariance matrices over irregular observation dates without CFL time-step clamping, an implicit backward Euler formulation is solved via the Thomas algorithm: $(I - \alpha L) B^{n+1} = B^n$.
 
 Using variable intervals $\Delta t_i = t_{i+1} - t_i$, cell widths use half-cell boundaries ($\Delta t_{e,0} = 0.5\Delta t_0$, $\Delta t_{e,N-1} = 0.5\Delta t_{N-2}$, $\Delta t_{e,i} = 0.5(\Delta t_{i-1}+\Delta t_i)$ elsewhere). Symmetrization $\tilde{B}_{\text{sym}} = 0.5(\tilde{B}+\tilde{B}^T)$ guarantees self-adjointness.
 
 ### 2. Spatial Patch Hold-out & Pooled RMSE
-Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE:
-```math
-\mathrm{RMSE}_{\mathrm{CV}}(k) = \sqrt{\frac{1}{N_{\mathrm{eval}}} \sum_{f=1}^K \sum_{i \in \mathrm{patch}_f} \left(X_a(i) - X_o(i)\right)^2}
-```
+Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE: $\text{RMSE}_{\text{CV}}(k) = \sqrt{\frac{1}{N_{\text{eval}}} \sum_{f=1}^K \sum_{i \in \text{patch}_f} \left(X_a(i) - X_o(i)\right)^2}$.
 
 Out-of-sample predictions are frozen at $k_{\text{opt}}$ prior to the final convergence pass with restored observations, preventing validation data leakage.
 
 ### 3. In-Stream Optimal Interpolation (OI) Analysis Error
-Following Beckers et al. (2006), analysis error variance is calculated in the reduced EOF subspace ($k \times k$) rather than in spatial coordinates ($M \times M$):
-```math
-A_t = \Lambda_k^{-1} + \frac{1}{\sigma_o^2} U_{\text{obs},t}^T U_{\text{obs},t}
-```
+Following Beckers et al. (2006), analysis error variance is calculated in the reduced EOF subspace ($k \times k$) rather than in spatial coordinates ($M \times M$): $A_t = \Lambda_k^{-1} + \frac{1}{\sigma_o^2} U_{\text{obs},t}^T U_{\text{obs},t}$.
 
-where $\Lambda_k = \frac{1}{N}\text{diag}(s_1^2,\dots,s_k^2)$ and $\sigma_o = \text{RMSE}_{\text{CV}}(k_{\text{opt}})$. The stationary background variance diagonal is precomputed once:
-```math
-[B]_{mm} = \sum_{i=1}^k \lambda_i (U_k)_{mi}^2
-```
+where $\Lambda_k = \frac{1}{N}\text{diag}(s_1^2,\dots,s_k^2)$ and $\sigma_o = \text{RMSE}_{\text{CV}}(k_{\text{opt}})$. The stationary background variance diagonal is precomputed once: $[B]_{mm} = \sum_{i=1}^k \lambda_i (U_k)_{mi}^2$.
 
-During NetCDF export, local error variance and relative error ratio are evaluated on the fly:
-```math
-[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj},
-\qquad
-r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0,1]
-```
+During NetCDF export, local error variance and relative error ratio are evaluated on the fly: $[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj}$, and $r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0,1]$.
 
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
-For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu,\sigma_{\ln}^2)$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact identity:
-```math
-\sigma_{\text{phys}}(m,t) = X_{\text{rec}}(m,t) \cdot \exp\left(\frac{[P_t]_{mm}}{2}\right)\sqrt{\exp\left([P_t]_{mm}\right)-1}
-```
+For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu,\sigma_{\ln}^2)$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact identity: $\sigma_{\text{phys}}(m,t) = X_{\text{rec}}(m,t) \cdot \exp\left(\frac{[P_t]_{mm}}{2}\right)\sqrt{\exp\left([P_t]_{mm}\right)-1}$.
 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
 Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) = [P_t]_{mm} / [B]_{mm} \in [0, 1]$:
 
-* **Linear scale (`apply_log=False`)**:
-  ```math
-  Y_{\text{final}}(m,t) = Y_{\text{rec}}(m,t) + r_t(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m,t)\right)\right) - Y_{\text{rec}}(m,t)\right]
-  ```
+* **Linear scale (`apply_log=False`)**: $Y_{\text{final}}(m,t) = Y_{\text{rec}}(m,t) + r_t(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m,t)\right)\right) - Y_{\text{rec}}(m,t)\right]$.
 
-* **Logarithmic scale (`apply_log=True`)**:
-  The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion:
-  ```math
-  \ln\left(Y_{\text{final}}(m,t)\right) = \ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)
-  ```
-  ```math
-  Y_{\text{final}}(m,t) = \exp\left(\ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)\right)
-  ```
-  where $\Delta_{\text{qmap},\ln} = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}\right)\right) - \ln Y_{\text{rec}}$.
+* **Logarithmic scale (`apply_log=True`)**: The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion: $\ln\left(Y_{\text{final}}(m,t)\right) = \ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)$ and $Y_{\text{final}}(m,t) = \exp\left(\ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)\right)$, where $\Delta_{\text{qmap},\ln} = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}\right)\right) - \ln Y_{\text{rec}}$.
 
 * **Data-leakage-free calibration**: Transfer functions are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
 * **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If $\text{KGE}_{\text{QMap}} < \text{KGE}_{\text{raw}}$, quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
@@ -159,10 +128,7 @@ Variance attenuation in unconstrained cloudy areas is corrected via Quantile Map
 
   ![Raw_VS_KeepOBS_VS_DumpOBS](Optional/benchmark_reconstruction_3y.gif)
 
-* **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$:
-```math
-\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3,\ 6,\ 30)
-```
+* **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$: $\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3,\ 6,\ 30)$.
 
 ---
 
@@ -174,16 +140,16 @@ DINEOF-HPC isolates raw array numerical algebra (`main.py`) from NetCDF dataset 
 
 ```text
 dineof_hpc/
-├── pyproject.toml                   # Build metadata & editable installation
-├── README.md                        # Technical documentation & formulation
+├── pyproject.toml            # Build metadata & editable installation
+├── README.md                 # Technical documentation & formulation
 └── src/
     └── dineof_hpc/
         ├── __init__.py
-        ├── example.py               # Batch execution script for HPC schedulers
+        ├── example.py        # Batch execution script for HPC schedulers
         └── core/
             ├── __init__.py
-            ├── main.py              # Mathematical engine (NumPy / Numba JIT)
-            └── io_utils.py          # NetCDF I/O, streaming OI error & diagnostics
+            ├── main.py       # Mathematical engine (NumPy / Numba JIT)
+            └── io_utils.py   # NetCDF I/O, streaming OI error
 ```
 
 ### Computational Dataflow
