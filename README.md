@@ -108,47 +108,85 @@ Out-of-sample predictions are frozen at $k_{\text{opt}}$ prior to the final conv
 ### 3. In-Stream Optimal Interpolation (OI) Analysis Error
 Following Beckers et al. (2006), analysis error variance is calculated in the reduced EOF subspace ($k \times k$) rather than in spatial coordinates ($M \times M$):
 
-$$A_{t} = \Lambda_{k}^{-1} + \frac{1}{\sigma_{o}^{2}} U_{\text{obs}, t}^{T} U_{\text{obs}, t}$$
+$$
+A_t = \Lambda_k^{-1} + \frac{1}{\sigma_o^2} U_{\text{obs},t}^T U_{\text{obs},t}
+$$
 
-where $\Lambda_{k} = \frac{1}{N}\text{diag}(s_{1}^{2}, \dots, s_{k}^{2})$ and $\sigma_{o} = \text{RMSE}_{\text{CV}}(k_{\text{opt}})$. The stationary background variance diagonal is precomputed once:
+where:
 
-$$[B]_{mm} = \sum_{i=1}^k \lambda_{i} (U_{k})_{mi}^{2}$$
+$$
+\Lambda_k = \frac{1}{N}\mathrm{diag}(s_1^2, \dots, s_k^2), \qquad \sigma_o = \text{RMSE}_{\text{CV}}(k_{\text{opt}})
+$$
+
+The stationary background variance diagonal is precomputed once:
+
+$$
+[B]_{mm} = \sum_{i=1}^k \lambda_i (U_k)_{mi}^2
+$$
 
 During NetCDF export, local error variance and relative error ratio are evaluated on the fly:
 
-$$[P_{t}]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_{k})_{mi} [A_{t}^{-1}]_{ij} (U_{k})_{mj}, \qquad r_{t}(m) = \frac{[P_{t}]_{mm}}{[B]_{mm}} \in [0, 1]$$
+$$
+[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj}, \qquad r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0, 1]
+$$
 
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
-For log-transformed environmental variables ($\ln X \sim \mathcal{N}(\mu, \sigma_{\ln}^{2})$), first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact analytical identity:
+For log-transformed environmental variables:
 
-$$\sigma_{\text{phys}}(m, t) = X_{\text{rec}}(m, t) \cdot \exp\left(\frac{\sigma_{\ln}^{2}(m, t)}{2}\right) \sqrt{\exp\left(\sigma_{\ln}^{2}(m, t)\right) - 1}$$
+$$
+\ln X \sim \mathcal{N}\left(\mu, \sigma_{\text{ln}}^{2}\right)
+$$
+
+first-order Taylor approximations underestimate physical dispersion under moderate-to-high uncertainty. Physical error is evaluated using the exact analytical identity:
+
+$$
+\sigma_{\text{phys}}(m, t) = X_{\text{rec}}(m, t) \cdot \exp\left(\frac{\sigma_{\ln}^{2}(m, t)}{2}\right) \sqrt{\exp\left(\sigma_{\ln}^{2}(m, t)\right) - 1}
+$$
 
 where the log-space error variance is scaled by the observational noise variance and the relative analysis error ratio:
 
-$$\sigma_{\ln}^{2}(m, t) = \sigma_{o}^{2} \cdot r_{t}(m) = \sigma_{o}^{2} \cdot \frac{[P_{t}]_{mm}}{[B]_{mm}}$$
+$$
+\sigma_{\ln}^{2}(m, t) = \sigma_{o}^{2} \cdot r_{t}(m) = \sigma_{o}^{2} \cdot \frac{[P_{t}]_{mm}}{[B]_{mm}}
+$$
 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
-Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_{t}(m) = [P_{t}]_{mm} / [B]_{mm} \in [0, 1]$:
+Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) \in [0, 1]$:
 
-* **Linear scale (`apply_log=False`)**:
+**Linear scale (`apply_log=False`):**
 
-  $$Y_{\text{final}}(m, t) = Y_{\text{rec}}(m, t) + r_{t}(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m, t)\right)\right) - Y_{\text{rec}}(m, t)\right]$$
+$$
+Y_{\text{final}}(m, t) = Y_{\text{rec}}(m, t) + r_t(m) \cdot \left[\mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(Y_{\text{rec}}(m, t)\right)\right) - Y_{\text{rec}}(m, t)\right]
+$$
 
-* **Logarithmic scale (`apply_log=True`)**:
-  The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion:
+**Logarithmic scale (`apply_log=True`):**
 
-  $$\ln\left(Y_{\text{final}}(m, t)\right) = \ln\left(Y_{\text{rec}}(m, t)\right) + r_{t}(m) \cdot \Delta_{\text{qmap},\ln}(m, t)$$
+The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion:
 
-  $$Y_{\text{final}}(m, t) = \exp\left(\ln\left(Y_{\text{rec}}(m, t)\right) + r_{t}(m) \cdot \Delta_{\text{qmap},\ln}(m, t)\right)$$
+$$
+\ln\left(Y_{\text{final}}(m, t)\right) = \ln\left(Y_{\text{rec}}(m, t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m, t)
+$$
 
-  where:
+$$
+Y_{\text{final}}(m, t) = \exp\left(\ln\left(Y_{\text{rec}}(m, t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m, t)\right)
+$$
 
-  $$\Delta_{\text{qmap},\ln}(m, t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}(m, t)\right)\right) - \ln Y_{\text{rec}}(m, t)$$
+where:
 
-* **Data-leakage-free calibration**: Transfer functions are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
-* **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If $\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}$, quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
+$$
+\Delta_{\text{qmap},\ln}(m, t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}(m, t)\right)\right) - \ln Y_{\text{rec}}(m, t)
+$$
+
+**Operational Safeguards:**
+
+* **Data-leakage-free calibration**: Transfer functions $\mathcal{Q}\_{\text{obs}}$ and $\mathcal{F}\_{\text{rec}}$ are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
+* **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If performance degrades:
+
+$$
+\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}
+$$
+
+quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
 * **Bounded extrapolation slopes**: High-quantile extrapolation is bounded ($\text{slope}_{\text{right}} \in [0.0, 1.0]$) in log space to avoid runaway under persistent cloud cover while preserving physical flood peaks.
-
 ---
 
 ## Implementation Details
@@ -417,7 +455,7 @@ Defined in `io_utils.py`, coordinates file-to-file batch reconstruction with str
 
 Every execution of `run_reconstruction_pipeline` produces three deliverables in `out_dir`:
 
-1. **Reconstructed NetCDF (`DINEOF_Reconstructed_<var>.nc`)**: `data` (reconstructed variable, physical units restored), `error` (analytical OI standard deviation $\sigma_{\text{phys}}$), `error_rel` (relative error ratio $r_{t}(m) = [P_{t}]_{mm} / [B]_{mm} \in [0, 1]$).
+1. **Reconstructed NetCDF (`DINEOF_Reconstructed_<var>.nc`)**: `data` (reconstructed variable, physical units restored), `error` (analytical OI standard deviation $\sigma_{\text{phys}}$), `error_rel` (relative error ratio $r_t(m) = P_t(m) / B(m) \in [0, 1]$).
 2. **Metrics Table (`Error_Matrix_<var>.csv`)**: `Modes_Optimum` ($k_{\text{opt}}$), `Sigma_o_ln`/`Sigma_o_log10`, `RMSE_Transformed`/`Bias_Transformed`/`R2_Transformed`, `RMSE_Physical`/`Bias_Physical`, `OI_Mean_Error`.
 3. **Dashboard Summary (`Dashboard_<var>.png`)**: 6-panel figure - hexbin scatter (truth vs. prediction), spectral error profile across concentration deciles, mode-selection convergence curve, spatial map of mean analysis error, spatial map of mean relative error, temporal error evolution.
 
