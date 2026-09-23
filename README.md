@@ -72,7 +72,7 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 
 ![Spectral Solver Crossover and Acceleration Frontier](Optional/fig_01_spectral_crossover.png)
 
-*Figure: Runtime scaling across temporal dimension $N$ and truncation rank $k$, showing the empirical crossover boundary $N^*(k)$ where Lanczos outperforms dense LAPACK.*
+*Figure: Runtime scaling across temporal dimension N and truncation rank k, showing the empirical crossover boundary $N^*(k)$ where Lanczos outperforms dense LAPACK.*
 
 **Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^{T} A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^{3})$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^{2})$, with convergence governed by the relative eigengap under the Kaniel-Paige-Saad theorem. `'auto'` applies the empirical crossover:
 
