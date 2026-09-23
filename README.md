@@ -36,9 +36,9 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat, regi
 
 ---
 
-## Feature Matrix: Upstream pyDINEOF vs. Canonical Fortran
+## Feature Matrix: Upstream `pyDINEOF` vs. Canonical Fortran
 
-| Component | Fortran DINEOF (GHER Reference) | Upstream pyDINEOF | DINEOF-HPC (This Implementation) |
+| Component | Fortran DINEOF (GHER Reference) | Upstream `pyDINEOF` | DINEOF-HPC (This Implementation) |
 | :--- | :--- | :--- | :--- |
 | **Spectral Solver** | Iterative restarted Lanczos via ARPACK (`dsaupd`/`dseupd`). | Iterative restarted Lanczos via `scipy.sparse.linalg.eigsh`. | Dense Hermitian eigensolver (`scipy.linalg.eigh`) with dynamic crossover to Lanczos / Randomized SVD - see [Performance Benchmarks](#performance-benchmarks-vs-canonical-fortran). |
 | **Memory & Iterative Update** | BLAS matrix-vector operations on 1D ocean coordinate vectors. | Explicit spatial mode computation $U = A V \Sigma^{-1}$, followed by dense $U \Sigma V^T$ allocation. | Sequential in-place spatial chunking with multi-threaded Numba JIT kernels - see [Implementation Details](#implementation-details). |
@@ -63,12 +63,12 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 
 | Processing Phase | Canonical Fortran DINEOF (GHER) | DINEOF-HPC | Architectural Factor |
 | :--- | :--- | :--- | :--- |
-| **Max Indexable Elements** | Bounded to $< 2.14 \times 10^9$ (`INTEGER*4`) | **Unbounded** (64-bit + chunking) | Native processing of $10^7$ to $10^8$ marine pixels |
-| **Covariance Step ($A^T A$)** | Dense full-grid product (~35.0 s/iter) | Precomputed subsampling (~5.3 s/iter) | **~6.6x faster**, $10^{-5}$ spectral equivalence |
+| **Max Indexable Elements** | Bounded to $\lt 2.14 \times 10^9$ (`INTEGER*4`) | **Unbounded** (64-bit + chunking) | Native processing of $10^7$–$10^8$ marine pixels |
+| **Covariance Step ($A^T A$)** | Dense full-grid product (~35.0 s/iter) | Precomputed subsampling (~5.3 s/iter) | **~6.6× faster**, $10^{-5}$ spectral equivalence |
 | **Missing Value Update** | OpenMP loops over 1D arrays (~3.8 s/iter) | Numba JIT parallel kernel (~3.35 s/iter) | Cache-aligned L3 streaming, zero 2D scatter penalties |
-| **Leading Mode Iteration** | ~39.5 s/iteration | **~11.2 s/iteration** | **~3.5x speedup** |
-| **OI Error Estimation** | Detached binary, full disk re-read (~45-60 min) | In-stream during NetCDF export (~15 min) | Eliminates 50+ GB redundant I/O passes |
-| **Full Pipeline (~15 modes)** | **~5h 25min** (projected) | **~1h 35min** (measured) | **~3.5x end-to-end acceleration** |
+| **Leading Mode Iteration** | ~39.5 s/iteration | **~11.2 s/iteration** | **~3.5× speedup** |
+| **OI Error Estimation** | Detached binary, full disk re-read (~45–60 min) | In-stream during NetCDF export (~15 min) | Eliminates 50+ GB redundant I/O passes |
+| **Full Pipeline (~15 modes)** | **~5h 25min** (projected) | **~1h 35min** (measured) | **~3.5× end-to-end acceleration** |
 
 ![Spectral Solver Crossover and Acceleration Frontier](Optional/fig_01_spectral_crossover.png)
 
@@ -78,7 +78,7 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 
 $$N^*(k) \approx \max(70, 10k)$$
 
-Dense LAPACK is selected below this threshold (avoiding Krylov restart overhead), and Lanczos/Randomized SVD above it (substantial gains for $N > 500$).
+Dense LAPACK below this threshold (avoiding Krylov restart overhead), Lanczos/Randomized SVD above it (substantial gains for $N > 500$).
 
 **Key drivers of the speedup:**
 1. **Precomputed covariance subsampling** - spatial subsampling indices are frozen once at startup rather than redrawn every iteration, cutting covariance FLOPs and memory traffic by up to an order of magnitude without compromising leading-EOF accuracy.
@@ -133,20 +133,25 @@ Variance attenuation in unconstrained cloudy areas is corrected via Quantile Map
   The modulated increment is evaluated directly in native logarithmic space before exponential inversion to prevent scale distortion:
   $$\ln\left(Y_{\text{final}}(m,t)\right) = \ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)$$
   $$Y_{\text{final}}(m,t) = \exp\left(\ln\left(Y_{\text{rec}}(m,t)\right) + r_t(m) \cdot \Delta_{\text{qmap},\ln}(m,t)\right)$$
-  where $\Delta_{\text{qmap},\ln}(m,t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}(m,t)\right)\right) - \ln Y_{\text{rec}}(m,t)$.
+  where:
+  $$\Delta_{\text{qmap},\ln}(m,t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\text{rec}}\left(\ln Y_{\text{rec}}(m,t)\right)\right) - \ln Y_{\text{rec}}(m,t)$$
 
 * **Data-leakage-free calibration**: Transfer functions are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
-* **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If $\text{KGE}_{\text{QMap}} < \text{KGE}_{\text{raw}}$, quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
+* **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If $\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}$, quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
 * **Bounded extrapolation slopes**: High-quantile extrapolation is bounded ($\text{slope}_{\text{right}} \in [0.0, 1.0]$) in log space to avoid runaway under persistent cloud cover while preserving physical flood peaks.
 
 ---
 
 ## Implementation Details
 
-* **Chunked spatial projection.** Since $U = A V \Sigma^{-1}$, reconstruction satisfies the algebraic identity:
+* **Chunked spatial projection.** Since $U = A V \Sigma^{-1}$, reconstruction satisfies:
+
   $$U \Sigma V^T = (A V \Sigma^{-1}) \Sigma V^T = A V V^T$$
+
   DINEOF-HPC evaluates this sequentially across spatial slices ($m \ll M$) directly in place:
+
   $$X_{\text{chunk}} = A_{\text{chunk}} V_k V_k^T$$
+
   via a multi-threaded Numba JIT kernel (`prange`), never allocating the full $U \in \mathbb{R}^{M \times k}$ and updating only missing coordinates.
 * **Progressive mode initialization.** To prevent unconverged higher modes from injecting high-frequency noise into gaps, iterations start strictly at $k=1$; each successive mode is initialized from the converged state of the preceding rank.
 * **Observation preservation vs. spatial continuum.** `keep_observations=True` retains observed pixels unchanged (strict gap-filling; may show a gradient seam at cloud edges due to raw sensor noise vs. low-rank smoothing). `keep_observations=False` returns the full continuous projection $\sum_{k=1}^{k_{\text{opt}}} u_k s_k v_k^T$, filtering noise everywhere for seamless gradients - useful for hydrodynamic front detection.
@@ -154,7 +159,8 @@ Variance attenuation in unconstrained cloudy areas is corrected via Quantile Map
   ![Raw_VS_KeepOBS_VS_DumpOBS](Optional/benchmark_reconstruction_3y.gif)
 
 * **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$:
-  $$\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3,\ 6,\ 30)$$
+
+  $$\sum_{i=1}^{k_{\text{target}}} \lambda_i \ge 0.95 \cdot \text{Tr}(B_0) \implies k_{\text{est}} = \text{clip}(k_{\text{target}}+3, 6, 30)$$
 
 ---
 
@@ -402,7 +408,7 @@ Defined in `io_utils.py`, coordinates file-to-file batch reconstruction with str
 
 Every execution of `run_reconstruction_pipeline` produces three deliverables in `out_dir`:
 
-1. **Reconstructed NetCDF (`DINEOF_Reconstructed_<var>.nc`)**: `data` (reconstructed variable, physical units restored), `error` (analytical OI standard deviation $\sigma_{\text{phys}}$), `error_rel` (relative error ratio $r_t(m) \in [0,1]$).
+1. **Reconstructed NetCDF (`DINEOF_Reconstructed_<var>.nc`)**: `data` (reconstructed variable, physical units restored), `error` (analytical OI standard deviation $\sigma_{\text{phys}}$), `error_rel` (relative error ratio $r_t(m) \in [0, 1]$).
 2. **Metrics Table (`Error_Matrix_<var>.csv`)**: `Modes_Optimum` ($k_{\text{opt}}$), `Sigma_o_ln`/`Sigma_o_log10`, `RMSE_Transformed`/`Bias_Transformed`/`R2_Transformed`, `RMSE_Physical`/`Bias_Physical`, `OI_Mean_Error`.
 3. **Dashboard Summary (`Dashboard_<var>.png`)**: 6-panel figure - hexbin scatter (truth vs. prediction), spectral error profile across concentration deciles, mode-selection convergence curve, spatial map of mean analysis error, spatial map of mean relative error, temporal error evolution.
 
