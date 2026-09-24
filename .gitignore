@@ -182,3 +182,4 @@ cython_debug/
 /src/Benchmark
 src/dineof_hpc/pydineof.oar
 src/dineof_hpc/example_CALC.py
+src/dineof_hpc/Example_CALC_area.py

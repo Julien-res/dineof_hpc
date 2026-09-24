@@ -125,6 +125,16 @@ def _read_and_extract_batch(
     X_target.flush()
 
 
+def _extract_coord_1d(ds: nc.Dataset, names: list[str]) -> np.ndarray | None:
+    """Extract a 1D coordinate array from a NetCDF dataset by checking potential variable names."""
+    for name in names:
+        if name in ds.variables:
+            arr = np.asarray(ds.variables[name][:])
+            if arr.ndim == 2:
+                return arr[:, 0] if name in ['lat', 'latitude', 'y', 'Y'] else arr[0, :]
+            return arr
+    return None
+
 def load_netcdf_masked(
     file_path: str,
     mask_file: str,
@@ -133,11 +143,12 @@ def load_netcdf_masked(
     batch_size: int = 50,
     n_workers: int = 6
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Load a masked NetCDF variable by batches using parallel decompression.
+    """Load a masked NetCDF variable by batches cropped to the mask bounding box.
 
     Extracts active water coordinates using bounding box cropping, raw array
     slicing with auto-masking disabled, and multi-process batch execution via
-    memory-mapped buffers.
+    memory-mapped buffers. Coordinates metadata and the 2D mask are cropped
+    to the bounding box.
 
     Parameters
     ----------
@@ -160,42 +171,31 @@ def load_netcdf_masked(
     X : np.ndarray
         2D spatiotemporal array of shape ``(n_water, n_time)`` and dtype ``float32``.
     mask_2d : np.ndarray
-        2D boolean domain mask where ``True`` indicates valid water pixels.
+        Cropped 2D boolean domain mask where ``True`` indicates valid water pixels.
     coords_meta : dict
-        Extracted coordinates metadata (``'time'``, ``'lat'``, ``'lon'``, ``'units'``).
+        Extracted coordinates metadata cropped to bounding box.
     """
-    # 1. Ingest mask and calculate spatial bounding box
+    # 1. Ingest mask data and spatial coordinates
     with nc.Dataset(mask_file, 'r') as m_ds:
         mask_raw = m_ds.variables['mask'][:]
         if np.ma.isMaskedArray(mask_raw):
             mask_raw = mask_raw.filled(0)
-        mask_2d = np.asarray(mask_raw == 1, dtype=bool)
+        mask_raw = np.asarray(mask_raw == 1, dtype=bool)
 
-    water_y, water_x = np.where(mask_2d)
-    n_water = len(water_y)
+        mask_lat = _extract_coord_1d(m_ds, ['lat', 'latitude', 'y', 'Y'])
+        mask_lon = _extract_coord_1d(m_ds, ['lon', 'longitude', 'x', 'X'])
 
-    y_min, y_max = int(np.min(water_y)), int(np.max(water_y)) + 1
-    x_min, x_max = int(np.min(water_x)), int(np.max(water_x)) + 1
-    width_crop = x_max - x_min
-
-    # Precalculate 1D flattened coordinates inside the cropped spatial window
-    water_y_crop = water_y - y_min
-    water_x_crop = water_x - x_min
-    water_flat_crop = water_y_crop * width_crop + water_x_crop
-
-    # 2. Extract coordinate metadata lazily
+    # 2. Extract reference coordinate metadata from input file
     with xr.open_dataset(file_path) as ds_meta:
-        coords_meta = {
-            'time': ds_meta.time.values,
-            'lat': ds_meta.lat.values,
-            'lon': ds_meta.lon.values,
-            'units': ds_meta[var_name].attrs.get('units', 'a.u.')
-        }
+        full_lat = ds_meta.lat.values
+        full_lon = ds_meta.lon.values
+        time_vals = ds_meta.time.values
+        units_val = ds_meta[var_name].attrs.get('units', 'a.u.')
 
-    # 3. Read dataset dimensions and chunk configuration
     with nc.Dataset(file_path, 'r') as ds_in:
         var = ds_in.variables[var_name]
-        n_time = var.shape[0]
+        var_shape = var.shape
+        n_time = var_shape[0]
         fill_val = getattr(var, '_FillValue', None)
 
         chunks = var.chunking()
@@ -204,7 +204,72 @@ def load_netcdf_masked(
             if time_chunk > 0:
                 batch_size = max(batch_size, time_chunk * max(1, batch_size // time_chunk))
 
-    # Allocate shared temporary memory map on scratch space or /dev/shm
+    # 3. Align mask spatially with the input dataset
+    if mask_raw.shape == var_shape[1:]:
+        # Case A: Mask is defined on the master grid
+        water_y, water_x = np.where(mask_raw)
+        n_water = len(water_y)
+        if n_water == 0:
+            raise ValueError(f"No valid water pixels (mask == 1) found in {mask_file}")
+
+        y_min, y_max = int(np.min(water_y)), int(np.max(water_y)) + 1
+        x_min, x_max = int(np.min(water_x)), int(np.max(water_x)) + 1
+        mask_2d = mask_raw[y_min:y_max, x_min:x_max]
+        water_flat_crop = (water_y - y_min) * (x_max - x_min) + (water_x - x_min)
+    else:
+        # Case B: Mask is already a sub-regional crop (e.g., Tonle Sap 7540x6114)
+        if mask_lat is None or mask_lon is None:
+            raise ValueError(
+                f"Shape mismatch: mask {mask_raw.shape} vs input {var_shape[1:]}, "
+                f"and mask file '{mask_file}' lacks lat/lon coordinates for geographic alignment."
+            )
+
+        ref_lat = full_lat[:, 0] if full_lat.ndim == 2 else full_lat
+        ref_lon = full_lon[0, :] if full_lon.ndim == 2 else full_lon
+
+        # Locate latitude boundaries
+        idx_y0 = int(np.argmin(np.abs(ref_lat - mask_lat[0])))
+        idx_y1 = int(np.argmin(np.abs(ref_lat - mask_lat[-1])))
+        if idx_y0 > idx_y1:
+            mask_raw = np.flipud(mask_raw)
+            y_min = idx_y1
+        else:
+            y_min = idx_y0
+
+        # Locate longitude boundaries
+        idx_x0 = int(np.argmin(np.abs(ref_lon - mask_lon[0])))
+        idx_x1 = int(np.argmin(np.abs(ref_lon - mask_lon[-1])))
+        if idx_x0 > idx_x1:
+            mask_raw = np.fliplr(mask_raw)
+            x_min = idx_x1
+        else:
+            x_min = idx_x0
+
+        y_max = y_min + mask_raw.shape[0]
+        x_max = x_min + mask_raw.shape[1]
+
+        if y_max > var_shape[1] or x_max > var_shape[2]:
+            raise ValueError(
+                f"Aligned bounding box [{y_min}:{y_max}, {x_min}:{x_max}] exceeds "
+                f"input grid shape {var_shape[1:]}."
+            )
+
+        mask_2d = mask_raw
+        water_y, water_x = np.where(mask_2d)
+        n_water = len(water_y)
+        if n_water == 0:
+            raise ValueError(f"No valid water pixels (mask == 1) found in {mask_file}")
+
+        water_flat_crop = water_y * mask_2d.shape[1] + water_x
+
+    coords_meta = {
+        'time': time_vals,
+        'lat': full_lat[y_min:y_max] if full_lat.ndim == 1 else full_lat[y_min:y_max, x_min:x_max],
+        'lon': full_lon[x_min:x_max] if full_lon.ndim == 1 else full_lon[y_min:y_max, x_min:x_max],
+        'units': units_val
+    }
+
+    # 4. Allocate shared temporary memory map
     scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER', '/dev/shm' if os.path.exists('/dev/shm') else '/tmp')
     mmap_path = os.path.join(scratch_dir, f"load_X_{os.getpid()}_{int(time.time() * 1000)}.dat")
     X_mmap = np.memmap(mmap_path, dtype=np.float32, mode='w+', shape=(n_water, n_time))
@@ -214,7 +279,7 @@ def load_netcdf_masked(
         for t in range(0, n_time, batch_size)
     ]
 
-    # 4. Parallel extraction across batches
+    # 5. Parallel extraction across batches
     Parallel(n_jobs=n_workers, backend='loky')(
         delayed(_read_and_extract_batch)(
             file_path=file_path,
@@ -235,7 +300,6 @@ def load_netcdf_masked(
         for t_start, t_end in tqdm(batch_ranges, desc="Loading NetCDF (parallel)", unit="batch")
     )
 
-    # 5. Load into RAM array and clean temporary buffer
     X = np.array(X_mmap, dtype=np.float32)
     if hasattr(X_mmap, '_mmap') and X_mmap._mmap is not None:
         X_mmap._mmap.close()
@@ -248,7 +312,6 @@ def load_netcdf_masked(
             pass
 
     return X, mask_2d, coords_meta
-
 
 def fit_quantile_transfer_training(
     X_obs_train: np.ndarray,
@@ -330,7 +393,7 @@ def stream_reconstruction_and_oi_netcdf(
 
     Processing is performed one date at a time. The function optionally applies
     uncertainty-weighted quantile mapping, writes reconstructed values and
-    errors to NetCDF, and accumulates spatial and temporal error summaries.
+    errors to NetCDF cropped to the bounding box, and accumulates summaries.
 
     Parameters
     ----------
@@ -342,7 +405,7 @@ def stream_reconstruction_and_oi_netcdf(
         Metadata returned by :func:`dineof`; it must contain ``u``, ``s``,
         ``sigma_o`` and ``obs_mask``.
     mask_2d : np.ndarray
-        2D water mask array.
+        Cropped 2D water mask array matching coords_meta spatial dimensions.
     coords_meta : dict
         Coordinate dictionary returned by :func:`load_netcdf_masked`.
     var_name : str
@@ -371,12 +434,6 @@ def stream_reconstruction_and_oi_netcdf(
         Mean relative error map (n_water,).
     temporal_err_mean : np.ndarray
         Domain-wide mean physical analysis error time series (n_time,).
-
-    Notes
-    -----
-    The output file contains ``data``, ``error`` and ``error_rel`` variables,
-    each with dimensions ``(time, lat, lon)``. Any memmap referenced by
-    ``dineof_meta['disk_file']`` is closed and removed after streaming.
     """
     n_time = len(coords_meta['time'])
     n_lat = len(coords_meta['lat'])
@@ -423,7 +480,7 @@ def stream_reconstruction_and_oi_netcdf(
         var_lat[:] = coords_meta['lat']
         var_lon[:] = coords_meta['lon']
 
-        # This diagonal is reused for every date in the OI calculation.
+        # Precompute background covariance diagonal on the cropped points
         lambda_k = (s_k ** 2) / float(n_time)
         b_diag_global = np.sum((U_k * lambda_k) * U_k, axis=1).astype(np.float32)
 
@@ -441,8 +498,6 @@ def stream_reconstruction_and_oi_netcdf(
                 b_diag=b_diag_global
             )
 
-            # Move the reconstruction toward observations according to OI
-            # confidence: observed locations receive little or no correction.
             if apply_qmap and (q_rec is not None) and (q_obs is not None):
                 if is_log_scale:
                     ln_rec = np.log(np.maximum(rec_t, 1e-7))
@@ -464,11 +519,9 @@ def stream_reconstruction_and_oi_netcdf(
             buf_data[mask_2d] = rec_final_t
             var_data[t, :, :] = buf_data
 
-            # Convert relative OI uncertainty into an absolute error estimate.
             sigma_o2 = float(sigma_o ** 2)
 
             if is_log_scale:
-                # In log space, propagate variance through the exponential map.
                 var_log_t = sigma_o2 * rel_err_t
                 valid_err = np.isfinite(var_log_t)
                 err_phys_t = np.full(n_water, np.nan, dtype=np.float32)
@@ -525,12 +578,7 @@ def export_diagnostics_and_plots(
     temporal_err_mean: np.ndarray,
     n_bins: int = 20
 ):
-    """Write validation CSV reports and a six-panel diagnostic dashboard.
-
-    Two CSV files are produced in ``out_dir``: a global error summary and an
-    intensity-binned error profile. A PNG dashboard combines cross-validation,
-    mode-selection, spatial OI, and temporal error plots.
-    """
+    """Write validation CSV reports and a six-panel diagnostic dashboard."""
     is_log = dineof_meta.get('apply_log', True)
 
     if is_log:
@@ -708,10 +756,10 @@ def run_reconstruction_pipeline(
     os.makedirs(out_dir, exist_ok=True)
     opts = dineof_kwargs.copy() if dineof_kwargs else {}
     if 'use_disk' not in opts:
-            opts['use_disk'] = use_disk
+        opts['use_disk'] = use_disk
     if 'solver' not in opts:
         opts['solver'] = solver
-    
+
     X_input, mask_2d, coords_meta = load_netcdf_masked(
         file_path=input_nc,
         mask_file=mask_file,
@@ -720,21 +768,21 @@ def run_reconstruction_pipeline(
     )
     n_water, n_time = X_input.shape
 
-    # Remove dates whose valid spatial coverage is below the requested minimum.
+    print(f"    [Domain] Sub-region bounding box: {len(coords_meta['lat'])} lat x {len(coords_meta['lon'])} lon ({n_water} active water pixels).")
+
+    # Preserve all calendar dates: blank low-coverage dates to NaN for reconstruction
     if min_valid_ratio > 0.0:
         valid_per_date = np.count_nonzero(~np.isnan(X_input), axis=0)
-        keep_dates = (valid_per_date / float(n_water)) >= min_valid_ratio
-        n_dropped = n_time - int(np.sum(keep_dates))
-        if n_dropped > 0:
-            print(f"    [Date Filter] Dropping {n_dropped} dates below {min_valid_ratio:.1%} coverage.")
-            X_input = X_input[:, keep_dates]
-            coords_meta['time'] = coords_meta['time'][keep_dates]
-            n_time = X_input.shape[1]
+        low_coverage = (valid_per_date / float(n_water)) < min_valid_ratio
+        n_blanked = int(np.sum(low_coverage))
+        if n_blanked > 0:
+            print(f"    [Date Filter] Setting {n_blanked} dates below {min_valid_ratio:.1%} coverage to NaN (preserved for reconstruction).")
+            X_input[:, low_coverage] = np.nan
 
     X_raw_observations = X_input.copy() if opts.get('keep_observations', True) else None
 
     print("\n-> Launching DINEOF core engine...")
-    
+
     X_final, meta = dineof(
         data=X_input,
         time_coords=coords_meta['time'],
@@ -747,7 +795,6 @@ def run_reconstruction_pipeline(
     truth_cv = meta['cv_truth']
     pred_cv = meta['cv_pred'].copy()
 
-    # Recompute OI relative uncertainty at the withheld evaluation coordinates.
     cv_r = meta['cv_rows']
     cv_c = meta['cv_cols']
     U_k = meta['u']
@@ -758,7 +805,7 @@ def run_reconstruction_pipeline(
     inv_lambda = 1.0 / np.maximum((s_k ** 2) / float(n_time), 1e-12)
     inv_sigma2 = 1.0 / max(sigma_o ** 2, 1e-12)
     lambda_k = (s_k ** 2) / float(n_time)
-    
+
     unique_dates = np.unique(cv_c)
     r_cv = np.empty(len(cv_r), dtype=np.float32)
 
@@ -786,13 +833,9 @@ def run_reconstruction_pipeline(
         rel_pts[valid_b] = np.clip(err_var_pts[valid_b] / b_diag_pts[valid_b], 0.0, 1.0)
         r_cv[mask_t] = rel_pts
 
-    # Calibrate quantile mapping strictly on observations not withheld for CV.
     q_rec, q_obs = None, None
     if apply_qmap:
-        # Start from the finite training-observation mask.
         obs_mask_train = np.isfinite(X_input)
-
-        # Prevent validation data from leaking into the calibration sample.
         cv_r = meta['cv_rows']
         cv_c = meta['cv_cols']
         obs_mask_train[cv_r, cv_c] = False
@@ -834,7 +877,6 @@ def run_reconstruction_pipeline(
                 nb_quantiles=qmap_nb_quantiles
             )
 
-            # Accept the transfer only when it improves the held-out KGE score.
             def compute_kge(yt, yp):
                 m = np.isfinite(yt) & np.isfinite(yp)
                 if np.sum(m) < 10:
@@ -860,7 +902,7 @@ def run_reconstruction_pipeline(
             if kge_qmap < kge_raw:
                 print(
                     f"\n[WARNING Q-MAP] Quantile mapping led to a degradation in performance (KGE: {kge_raw:.3f} -> {kge_qmap:.3f}).\n"
-                    f"Deactivation of quantile mapping to preserve reconstruction quality."
+                    "Deactivation of quantile mapping to preserve reconstruction quality."
                 )
                 apply_qmap = False
                 q_rec, q_obs = None, None
