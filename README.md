@@ -71,8 +71,7 @@ Benchmark on a dual-socket HPC node (dual AMD EPYC 48-core processors, 96 thread
 | **Full Pipeline (~15 modes)** | **~5h 25min** (projected) | **~1h 35min** (measured) | **~3.5x end-to-end acceleration** |
 
 ![Spectral Solver Crossover and Acceleration Frontier](Optional/fig_01_spectral_crossover.png)
-
-*Figure: Runtime scaling across temporal dimension N and truncation rank k, showing the empirical crossover boundary $N^*(k)$ where Lanczos outperforms dense LAPACK.*
+Figure: Runtime scaling across temporal dimension $N$ and truncation rank $k$, showing the empirical crossover boundary $N_{\text{crit}}(k)$ where Lanczos outperforms dense LAPACK.
 
 **Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^{T} A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^{3})$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^{2})$, with convergence governed by the relative eigengap under the Kaniel-Paige-Saad theorem. `'auto'` applies the empirical crossover:
 
@@ -375,11 +374,6 @@ run_reconstruction_pipeline(
 On multi-socket architectures, distribute memory allocations across all NUMA channels:
 
 ```bash
-#!/bin/bash
-#OAR -l /core=96,walltime=24:00:00
-#OAR -q default
-#OAR -n DINEOF_PRODUCTION
-
 # Configure OpenMP, BLAS, and Numba thread pools
 export OMP_NUM_THREADS=96
 export MKL_NUM_THREADS=96
