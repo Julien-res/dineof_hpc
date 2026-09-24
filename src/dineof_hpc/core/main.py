@@ -34,10 +34,8 @@ from scipy.sparse.linalg import eigsh
 try:
     from numba import jit, prange
     HAS_NUMBA = True
-    print('NUMBA JIT acceleration enabled.')
 except ImportError:
     HAS_NUMBA = False
-    print('NUMBA JIT acceleration not available. Falling back to pure Python implementation.')
 
 
 # =============================================================================
@@ -865,6 +863,8 @@ def dineof(
         X_work = data.copy()
 
     # Remove rows that cannot contribute to the covariance or reconstruction.
+    if verbose:
+        print("   [1/5] Ingesting domain data and filtering inactive spatial points...")
     nan_rows = np.isnan(X_work).all(axis=1)
     X_active = X_work[~nan_rows] if np.any(nan_rows) else X_work
 
@@ -882,6 +882,8 @@ def dineof(
         subsample_scale = 1.0
 
     if nev is None:
+        if verbose:
+            print("   [2/5] Estimating optimal rank ceiling from initial covariance spectrum...")
         nev = _estimate_nev(
             Xa=X_active,
             N=N,
@@ -913,6 +915,8 @@ def dineof(
         raise ValueError("Insufficient valid observations to compute DINEOF.")
 
     # Transform to the numerical working space, then center the field.
+    if verbose:
+        print("   [3/5] Applying data transformations and spatial climatology centering...")
     if apply_log:
         X_active[X_active <= 0.0] = np.nan
         np.log(X_active, out=X_active)
@@ -1016,10 +1020,17 @@ def dineof(
         print(f"Cross-validation: {len(patches)} patch sets ({total_cv_points} masked evaluation points).")
 
     # Start with one mode so later rank increments have a stable initialization.
+    if verbose:
+        print("   [5/5] Performing progressive initialization (Mode 1 warm-up pass)...")
     t0_step = time.perf_counter()
     _ssvd_spectral(Xa, 1, arr_time, alpha, numit, u, s, v, compute_u=False,
                idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed)
     _parallel_update_orchestrator(Xa, v, 1, mask_miss, buf_proj, buf_rec)
+    if verbose:
+        print(f"\nDINEOF engine ready: {M} spatial points x {N} dates.")
+        print(f"Cross-validation: {len(patches)} patch sets ({total_cv_points} masked evaluation points).")
+        print("Starting iterative mode exploration:\n")
+
     t_profiling['init_pass'] = time.perf_counter() - t0_step
 
     valc = []

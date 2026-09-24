@@ -14,12 +14,14 @@ by ``NaN``.
 from __future__ import annotations
 
 import os
+import time
 import numpy as np
 import xarray as xr
 import pandas as pd
 import netCDF4 as nc
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, r2_score
+from joblib import Parallel, delayed
 from tqdm import tqdm
 
 try:
@@ -79,72 +81,172 @@ def _interp_extrap(
     return y
 
 
+def _read_and_extract_batch(
+    file_path: str,
+    var_name: str,
+    t_start: int,
+    t_end: int,
+    y_min: int,
+    y_max: int,
+    x_min: int,
+    x_max: int,
+    water_flat_crop: np.ndarray,
+    fill_value: float | None,
+    threshold: float | None,
+    mmap_path: str,
+    n_water: int,
+    n_time: int
+):
+    """Worker task extracting a spatial slice directly into a memory-mapped array."""
+    # Open dataset independently in read-only mode to enable parallel decompression
+    with nc.Dataset(file_path, 'r') as ds:
+        var = ds.variables[var_name]
+        var.set_auto_mask(False)
+
+        # Slice restricted spatial bounding box to skip unneeded terrestrial chunks
+        block = var[t_start:t_end, y_min:y_max, x_min:x_max]
+
+    cur_time = block.shape[0]
+    # Flatten spatial axes to accelerate 1D linear coordinate indexing
+    block_2d = block.reshape(cur_time, -1)
+    extracted = block_2d[:, water_flat_crop]
+
+    # Handle NetCDF fill value replacement
+    if fill_value is not None and not np.isnan(fill_value):
+        extracted[extracted == fill_value] = np.nan
+
+    # Apply physical lower bound threshold
+    if threshold is not None:
+        extracted[extracted <= threshold] = np.nan
+
+    # Open target memory-mapped array and write slice directly without IPC serialization
+    X_target = np.memmap(mmap_path, dtype=np.float32, mode='r+', shape=(n_water, n_time))
+    X_target[:, t_start:t_end] = extracted.T
+    X_target.flush()
+
+
 def load_netcdf_masked(
     file_path: str,
     mask_file: str,
     var_name: str,
     threshold: float | None = None,
-    batch_size: int = 10
+    batch_size: int = 50,
+    n_workers: int = 6
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Load a masked NetCDF variable by batches of time slices.
+    """Load a masked NetCDF variable by batches using parallel decompression.
 
-    The source variable is flattened over the pixels where the mask equals one;
-    this is the representation expected by :func:`dineof`. Only one batch is
-    materialized from the lazy xarray dataset at a time.
+    Extracts active water coordinates using bounding box cropping, raw array
+    slicing with auto-masking disabled, and multi-process batch execution via
+    memory-mapped buffers.
 
     Parameters
     ----------
     file_path : str
-        Path to input primary NetCDF file.
+        Path to the primary NetCDF dataset file.
     mask_file : str
-        Path to 2D water mask NetCDF file.
+        Path to the 2D water domain mask NetCDF file.
     var_name : str
-        Target variable name inside file_path.
-    threshold : float or None
-        Physical lower bound. Values less than or equal to it become ``NaN``.
-    batch_size : int
-        Number of time slices read simultaneously.
+        Target geophysical variable name within ``file_path``.
+    threshold : float or None, default=None
+        Physical lower bound. Values less than or equal to this threshold are
+        set to ``NaN``.
+    batch_size : int, default=50
+        Number of time slices processed per batch.
+    n_workers : int, default=6
+        Number of parallel worker processes for concurrent decompression.
 
     Returns
     -------
     X : np.ndarray
-        2D matrix of shape (n_water, n_time).
+        2D spatiotemporal array of shape ``(n_water, n_time)`` and dtype ``float32``.
     mask_2d : np.ndarray
-        2D boolean water mask array.
+        2D boolean domain mask where ``True`` indicates valid water pixels.
     coords_meta : dict
-        Dictionary with ``time``, ``lat``, ``lon`` and ``units`` entries.
-
-    Notes
-    -----
-    The input dataset is closed before returning. The mask file must contain a
-    variable named ``mask`` compatible with the spatial dimensions of
-    ``var_name``.
+        Extracted coordinates metadata (``'time'``, ``'lat'``, ``'lon'``, ``'units'``).
     """
-    ds_in = xr.open_dataset(file_path, chunks={'time': batch_size})
+    # 1. Ingest mask and calculate spatial bounding box
+    with nc.Dataset(mask_file, 'r') as m_ds:
+        mask_raw = m_ds.variables['mask'][:]
+        if np.ma.isMaskedArray(mask_raw):
+            mask_raw = mask_raw.filled(0)
+        mask_2d = np.asarray(mask_raw == 1, dtype=bool)
 
-    with xr.open_dataset(mask_file) as m:
-        mask_2d = (m['mask'].fillna(0) == 1).values
+    water_y, water_x = np.where(mask_2d)
+    n_water = len(water_y)
 
-    n_water = int(np.sum(mask_2d))
-    n_time = ds_in.time.size
+    y_min, y_max = int(np.min(water_y)), int(np.max(water_y)) + 1
+    x_min, x_max = int(np.min(water_x)), int(np.max(water_x)) + 1
+    width_crop = x_max - x_min
 
-    X = np.zeros((n_water, n_time), dtype=np.float32)
-    for t_start in tqdm(range(0, n_time, batch_size), desc="Loading NetCDF", unit="batch"):
-        t_end = min(t_start + batch_size, n_time)
-        block = ds_in[var_name].isel(time=slice(t_start, t_end)).values
-        for i, t in enumerate(range(t_start, t_end)):
-            X[:, t] = block[i][mask_2d]
+    # Precalculate 1D flattened coordinates inside the cropped spatial window
+    water_y_crop = water_y - y_min
+    water_x_crop = water_x - x_min
+    water_flat_crop = water_y_crop * width_crop + water_x_crop
 
-    if threshold is not None:
-        X[X <= threshold] = np.nan
+    # 2. Extract coordinate metadata lazily
+    with xr.open_dataset(file_path) as ds_meta:
+        coords_meta = {
+            'time': ds_meta.time.values,
+            'lat': ds_meta.lat.values,
+            'lon': ds_meta.lon.values,
+            'units': ds_meta[var_name].attrs.get('units', 'a.u.')
+        }
 
-    coords_meta = {
-        'time': ds_in.time.values,
-        'lat': ds_in.lat.values,
-        'lon': ds_in.lon.values,
-        'units': ds_in[var_name].attrs.get('units', 'a.u.')
-    }
-    ds_in.close()
+    # 3. Read dataset dimensions and chunk configuration
+    with nc.Dataset(file_path, 'r') as ds_in:
+        var = ds_in.variables[var_name]
+        n_time = var.shape[0]
+        fill_val = getattr(var, '_FillValue', None)
+
+        chunks = var.chunking()
+        if chunks and chunks != 'contiguous':
+            time_chunk = chunks[0]
+            if time_chunk > 0:
+                batch_size = max(batch_size, time_chunk * max(1, batch_size // time_chunk))
+
+    # Allocate shared temporary memory map on scratch space or /dev/shm
+    scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER', '/dev/shm' if os.path.exists('/dev/shm') else '/tmp')
+    mmap_path = os.path.join(scratch_dir, f"load_X_{os.getpid()}_{int(time.time() * 1000)}.dat")
+    X_mmap = np.memmap(mmap_path, dtype=np.float32, mode='w+', shape=(n_water, n_time))
+
+    batch_ranges = [
+        (t, min(t + batch_size, n_time))
+        for t in range(0, n_time, batch_size)
+    ]
+
+    # 4. Parallel extraction across batches
+    Parallel(n_jobs=n_workers, backend='loky')(
+        delayed(_read_and_extract_batch)(
+            file_path=file_path,
+            var_name=var_name,
+            t_start=t_start,
+            t_end=t_end,
+            y_min=y_min,
+            y_max=y_max,
+            x_min=x_min,
+            x_max=x_max,
+            water_flat_crop=water_flat_crop,
+            fill_value=fill_val,
+            threshold=threshold,
+            mmap_path=mmap_path,
+            n_water=n_water,
+            n_time=n_time
+        )
+        for t_start, t_end in tqdm(batch_ranges, desc="Loading NetCDF (parallel)", unit="batch")
+    )
+
+    # 5. Load into RAM array and clean temporary buffer
+    X = np.array(X_mmap, dtype=np.float32)
+    if hasattr(X_mmap, '_mmap') and X_mmap._mmap is not None:
+        X_mmap._mmap.close()
+    del X_mmap
+
+    if os.path.exists(mmap_path):
+        try:
+            os.remove(mmap_path)
+        except OSError:
+            pass
+
     return X, mask_2d, coords_meta
 
 
@@ -631,6 +733,8 @@ def run_reconstruction_pipeline(
 
     X_raw_observations = X_input.copy() if opts.get('keep_observations', True) else None
 
+    print("\n-> Launching DINEOF core engine...")
+    
     X_final, meta = dineof(
         data=X_input,
         time_coords=coords_meta['time'],
