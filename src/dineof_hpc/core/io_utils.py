@@ -3,7 +3,8 @@
 
 The module connects the array-based numerical core to geophysical NetCDF files.
 It provides batched loading, streaming reconstruction with optimal-interpolation
-(OI) uncertainty, leakage-free empirical quantile mapping, and diagnostic report
+(OI) uncertainty, leakage-free empirical quantile mapping, local residual
+objective analysis with cross-validation arbitration, and diagnostic report
 generation. The numerical core remains in :mod:`dineof_hpc.core.main`.
 
 Unless stated otherwise, matrices use the convention ``(space, time)`` and
@@ -20,6 +21,7 @@ import xarray as xr
 import pandas as pd
 import netCDF4 as nc
 import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
 from sklearn.metrics import mean_squared_error, r2_score
 from joblib import Parallel, delayed
 from tqdm import tqdm
@@ -134,6 +136,7 @@ def _extract_coord_1d(ds: nc.Dataset, names: list[str]) -> np.ndarray | None:
                 return arr[:, 0] if name in ['lat', 'latitude', 'y', 'Y'] else arr[0, :]
             return arr
     return None
+
 
 def load_netcdf_masked(
     file_path: str,
@@ -312,6 +315,297 @@ def load_netcdf_masked(
             pass
 
     return X, mask_2d, coords_meta
+
+
+def arbitrate_local_residual_refinement(
+    X_rec: np.ndarray,
+    X_raw_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    dineof_meta: dict,
+    candidate_sigmas: list[float] | None = None,
+    decorrelation_cutoff: float = 0.05,
+    is_log_scale: bool = False
+) -> tuple[bool, float | None, np.ndarray]:
+    """Arbitrate local residual refinement against reachable cross-validation points.
+
+    Evaluates candidate spatial kernel bandwidths on withheld evaluation points
+    that fall within the observational support of the Gaussian kernel (W >= cutoff),
+    preventing large-patch geometric artifacts from diluting local filter skill.
+
+    Parameters
+    ----------
+    X_rec : np.ndarray
+        Reconstructed matrix of shape (n_water, n_time).
+    X_raw_obs : np.ndarray
+        Raw un-imputed observation matrix of shape (n_water, n_time) containing NaNs.
+    mask_2d : np.ndarray
+        2D boolean domain mask where True indicates valid water pixels.
+    dineof_meta : dict
+        Metadata dictionary containing 'cv_rows', 'cv_cols', 'cv_truth', 'cv_pred'.
+    candidate_sigmas : list of float or None, default=None
+        List of Gaussian sigma candidates (in pixels) to evaluate.
+    decorrelation_cutoff : float, default=0.05
+        Observation density threshold below which corrections are ignored.
+    is_log_scale : bool, default=False
+        Whether errors and residuals are evaluated in log-transformed space.
+
+    Returns
+    -------
+    validated : bool
+        True if local refinement improves out-of-sample RMSE on supported points.
+    best_sigma : float or None
+        Optimal spatial bandwidth in pixels, or None if arbitration failed.
+    pred_cv_refined : np.ndarray
+        Updated cross-validation predictions reflecting the optimal refinement.
+    """
+    cv_r = dineof_meta.get('cv_rows')
+    cv_c = dineof_meta.get('cv_cols')
+    truth_cv = dineof_meta.get('cv_truth')
+    pred_cv = dineof_meta.get('cv_pred')
+
+    if cv_r is None or len(cv_r) == 0 or truth_cv is None or pred_cv is None:
+        print("   [Refinement Gate] No cross-validation points available. Skipping refinement.")
+        return False, None, pred_cv
+
+    if candidate_sigmas is None:
+        candidate_sigmas = [1.5, 2.5, 3.5, 5.0, 7.0]
+
+    # Clean finite held-out evaluation pairs
+    if is_log_scale:
+        valid_cv = np.isfinite(truth_cv) & np.isfinite(pred_cv) & (truth_cv > 0) & (pred_cv > 0)
+        target_truth = np.log(truth_cv[valid_cv])
+        target_raw = np.log(pred_cv[valid_cv])
+    else:
+        valid_cv = np.isfinite(truth_cv) & np.isfinite(pred_cv)
+        target_truth = truth_cv[valid_cv]
+        target_raw = pred_cv[valid_cv]
+
+    if np.sum(valid_cv) < 30:
+        print("   [Refinement Gate] Insufficient valid CV points (< 30). Skipping refinement.")
+        return False, None, pred_cv
+
+    sub_cv_r = cv_r[valid_cv]
+    sub_cv_c = cv_c[valid_cv]
+    unique_dates = np.unique(sub_cv_c)
+
+    n_lat, n_lon = mask_2d.shape
+    water_y, water_x = np.where(mask_2d)
+
+    # Precompute per-date residual grids with held-out CV points masked out
+    date_data = {}
+    for t in unique_dates:
+        raw_t = X_raw_obs[:, t].copy()
+        rec_t = X_rec[:, t]
+
+        cv_mask_t = (sub_cv_c == t)
+        pts_cv_t = sub_cv_r[cv_mask_t]
+        raw_t[pts_cv_t] = np.nan
+
+        valid_obs = np.isfinite(raw_t)
+        if np.count_nonzero(valid_obs) < 5:
+            continue
+
+        buf_obs = np.zeros((n_lat, n_lon), dtype=np.float32)
+        buf_rec = np.zeros((n_lat, n_lon), dtype=np.float32)
+        buf_mask = np.zeros((n_lat, n_lon), dtype=np.float32)
+
+        buf_rec[water_y, water_x] = rec_t
+
+        obs_y = water_y[valid_obs]
+        obs_x = water_x[valid_obs]
+        buf_obs[obs_y, obs_x] = raw_t[valid_obs]
+        buf_mask[obs_y, obs_x] = 1.0
+
+        res_2d = np.zeros((n_lat, n_lon), dtype=np.float32)
+        if is_log_scale:
+            obs_log = np.log(np.maximum(buf_obs[obs_y, obs_x], 1e-7))
+            rec_log = np.log(np.maximum(buf_rec[obs_y, obs_x], 1e-7))
+            res_2d[obs_y, obs_x] = obs_log - rec_log
+        else:
+            res_2d[obs_y, obs_x] = buf_obs[obs_y, obs_x] - buf_rec[obs_y, obs_x]
+
+        date_data[t] = {
+            'res_2d': res_2d,
+            'mask_2d': buf_mask,
+            'cv_mask_t': cv_mask_t,
+            'pts_cv_t': pts_cv_t
+        }
+
+    if len(date_data) == 0:
+        print("   [Refinement Gate] No evaluable CV dates with sufficient observations.")
+        return False, None, pred_cv
+
+    scale_label = "ln" if is_log_scale else "phys"
+    print(f"\n   [Refinement Gate] Evaluating Barnes residual filter on active CV support...")
+
+    best_gain_pct = 0.0
+    best_sigma = None
+    best_pred_cand = target_raw.copy()
+
+    for sigma in candidate_sigmas:
+        pred_cand = target_raw.copy()
+        has_support = np.zeros(len(target_raw), dtype=bool)
+
+        for t, d_info in date_data.items():
+            res_conv = gaussian_filter(d_info['res_2d'], sigma=sigma, mode='constant', cval=0.0)
+            w_conv = gaussian_filter(d_info['mask_2d'], sigma=sigma, mode='constant', cval=0.0)
+
+            valid_w = w_conv > decorrelation_cutoff
+            corr_2d = np.zeros((n_lat, n_lon), dtype=np.float32)
+            corr_2d[valid_w] = res_conv[valid_w] / w_conv[valid_w]
+
+            corr_1d = corr_2d[mask_2d]
+            pts_t = d_info['pts_cv_t']
+            cv_indices = np.where(d_info['cv_mask_t'])[0]
+
+            support_1d = valid_w[mask_2d]
+            has_support[cv_indices] = support_1d[pts_t]
+
+            if is_log_scale:
+                pred_cand[cv_indices] += np.clip(corr_1d[pts_t], -3.0, 3.0)
+            else:
+                pred_cand[cv_indices] += corr_1d[pts_t]
+
+        n_supported = int(np.sum(has_support))
+        if n_supported < 20:
+            print(f"      Candidate sigma = {sigma:4.1f} px | Reachable CV points: {n_supported} (< 20, skipped)")
+            continue
+
+        # Evaluate strictly on points within reach of the Barnes filter
+        rmse_base_sub = float(np.sqrt(mean_squared_error(target_truth[has_support], target_raw[has_support])))
+        rmse_cand_sub = float(np.sqrt(mean_squared_error(target_truth[has_support], pred_cand[has_support])))
+        gain_pct = ((rmse_base_sub - rmse_cand_sub) / rmse_base_sub) * 100.0
+
+        pct_patch = (n_supported / len(target_raw)) * 100.0
+        delta_str = f"{rmse_cand_sub - rmse_base_sub:+.4f}"
+        print(
+            f"      Candidate sigma = {sigma:4.1f} px | Supported points: {n_supported:5d} ({pct_patch:4.1f}%) | "
+            f"RMSE: {rmse_base_sub:.4f} -> {rmse_cand_sub:.4f} ({delta_str}, Gain: {gain_pct:+.2f}%)"
+        )
+
+        if gain_pct > best_gain_pct:
+            best_gain_pct = gain_pct
+            best_sigma = sigma
+            best_pred_cand = pred_cand.copy()
+
+    # Validation criteria: must improve reachable RMSE by at least 1.0% without degrading global RMSE
+    if best_sigma is not None and best_gain_pct >= 1.0:
+        rmse_global_raw = float(np.sqrt(mean_squared_error(target_truth, target_raw)))
+        rmse_global_refined = float(np.sqrt(mean_squared_error(target_truth, best_pred_cand)))
+
+        if rmse_global_refined <= rmse_global_raw:
+            print(
+                f"   [Refinement Gate VALIDATED] Selected sigma = {best_sigma:.1f} px "
+                f"(Local gain: +{best_gain_pct:.2f}%, Global RMSE: {rmse_global_raw:.4f} -> {rmse_global_refined:.4f})."
+            )
+
+            final_pred_cv = pred_cv.copy()
+            if is_log_scale:
+                final_pred_cv[valid_cv] = np.exp(best_pred_cand)
+            else:
+                final_pred_cv[valid_cv] = best_pred_cand
+
+            return True, best_sigma, final_pred_cv
+
+    print("   [Refinement Gate REJECTED] No candidate scale demonstrated robust improvement on reachable points.")
+    return False, None, pred_cv
+
+
+def apply_local_residual_refinement_2d(
+    X_rec: np.ndarray,
+    X_raw_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    sigma_spatial_pixels: float = 3.0,
+    decorrelation_cutoff: float = 0.05,
+    is_log_scale: bool = False
+) -> np.ndarray:
+    """Refine DINEOF reconstruction with local residual objective analysis (Barnes filter).
+
+    Propagates high-frequency spatial residuals from genuine satellite observations
+    to adjacent unobserved pixels using a normalized Gaussian spatial kernel.
+    The local correction smoothly decays to zero as distance from observations
+    exceeds the spatial decorrelation length.
+
+    Parameters
+    ----------
+    X_rec : np.ndarray
+        Reconstructed matrix of shape ``(n_water, n_time)`` and dtype ``float32``.
+    X_raw_obs : np.ndarray
+        Raw un-imputed observation matrix of shape ``(n_water, n_time)`` containing NaNs.
+    mask_2d : np.ndarray
+        2D boolean domain mask where ``True`` indicates valid water pixels.
+    sigma_spatial_pixels : float, default=3.0
+        Standard deviation of the Gaussian spatial smoothing kernel (in pixels).
+    decorrelation_cutoff : float, default=0.05
+        Observation density threshold below which local residual corrections are ignored.
+    is_log_scale : bool, default=False
+        Whether to compute multiplicative residuals in natural-log space to preserve
+        positivity of biogeochemical tracers.
+
+    Returns
+    -------
+    X_refined : np.ndarray
+        Refined spatiotemporal reconstruction array of shape ``(n_water, n_time)``.
+    """
+    n_water, n_time = X_rec.shape
+    n_lat, n_lon = mask_2d.shape
+
+    X_refined = X_rec.copy()
+
+    buf_obs = np.zeros((n_lat, n_lon), dtype=np.float32)
+    buf_rec = np.zeros((n_lat, n_lon), dtype=np.float32)
+    buf_mask_obs = np.zeros((n_lat, n_lon), dtype=np.float32)
+
+    water_indices = np.where(mask_2d)
+
+    for t in tqdm(range(n_time), desc="Applying Local Spatial Refinement", unit="date"):
+        raw_t = X_raw_obs[:, t]
+        rec_t = X_rec[:, t]
+
+        valid_obs = np.isfinite(raw_t)
+        n_obs = int(np.count_nonzero(valid_obs))
+
+        if n_obs < 10:
+            continue
+
+        buf_obs.fill(0.0)
+        buf_rec.fill(0.0)
+        buf_mask_obs.fill(0.0)
+
+        buf_rec[water_indices] = rec_t
+
+        obs_y = water_indices[0][valid_obs]
+        obs_x = water_indices[1][valid_obs]
+        obs_indices = (obs_y, obs_x)
+
+        buf_obs[obs_indices] = raw_t[valid_obs]
+        buf_mask_obs[obs_indices] = 1.0
+
+        residual_2d = np.zeros((n_lat, n_lon), dtype=np.float32)
+        if is_log_scale:
+            buf_obs_log = np.log(np.maximum(buf_obs[obs_indices], 1e-7))
+            buf_rec_log = np.log(np.maximum(buf_rec[obs_indices], 1e-7))
+            residual_2d[obs_indices] = buf_obs_log - buf_rec_log
+        else:
+            residual_2d[obs_indices] = buf_obs[obs_indices] - buf_rec[obs_indices]
+
+        res_conv = gaussian_filter(residual_2d, sigma=sigma_spatial_pixels, mode='constant', cval=0.0)
+        weight_conv = gaussian_filter(buf_mask_obs, sigma=sigma_spatial_pixels, mode='constant', cval=0.0)
+
+        valid_weight = weight_conv > decorrelation_cutoff
+        local_correction = np.zeros((n_lat, n_lon), dtype=np.float32)
+        local_correction[valid_weight] = res_conv[valid_weight] / weight_conv[valid_weight]
+
+        corr_1d = local_correction[mask_2d]
+
+        unobserved = ~valid_obs
+        if is_log_scale:
+            X_refined[unobserved, t] = X_rec[unobserved, t] * np.exp(np.clip(corr_1d[unobserved], -3.0, 3.0))
+        else:
+            X_refined[unobserved, t] += corr_1d[unobserved]
+
+    return X_refined
+
 
 def fit_quantile_transfer_training(
     X_obs_train: np.ndarray,
@@ -697,6 +991,8 @@ def run_reconstruction_pipeline(
     use_climatology: bool = True,
     apply_qmap: bool = True,
     qmap_nb_quantiles: int = 100,
+    apply_local_refinement: bool = False,
+    local_refinement_sigma: float | None = None,
     use_disk: bool = False,
     solver: str = 'auto',
     dineof_kwargs: dict | None = None
@@ -704,9 +1000,10 @@ def run_reconstruction_pipeline(
     """Run the complete NetCDF-to-diagnostics reconstruction workflow.
 
     The workflow loads and masks the input field, removes dates with insufficient
-    spatial coverage, runs the numerical DINEOF core, optionally calibrates a
-    leakage-free quantile transfer, streams the reconstruction to NetCDF, and
-    writes validation reports and figures.
+    spatial coverage, runs the numerical DINEOF core, optionally refines the
+    reconstruction with local spatial residuals (Barnes objective analysis filter)
+    arbitrated via held-out cross-validation, calibrates a leakage-free quantile
+    transfer, streams the reconstruction to NetCDF, and writes validation reports.
 
     Parameters
     ----------
@@ -733,6 +1030,11 @@ def run_reconstruction_pipeline(
         passes its out-of-sample quality check.
     qmap_nb_quantiles : int
         Number of points used to represent the quantile transfer curve.
+    apply_local_refinement : bool, default=False
+        Whether to refine unobserved pixels with local residual objective analysis.
+    local_refinement_sigma : float or None, default=None
+        Standard deviation in pixels of the Gaussian kernel for residual refinement.
+        If None, tests a candidate grid [1.5, 2.5, 3.5, 5.0, 7.0] and auto-selects.
     use_disk : bool
         Store DINEOF work arrays in temporary memory-mapped files when possible.
     solver : str
@@ -746,12 +1048,6 @@ def run_reconstruction_pipeline(
     None
         Results are written to ``out_dir``. The main output is
         ``DINEOF_Reconstructed_<var_name>.nc``.
-
-    Notes
-    -----
-    Quantile mapping is calibrated on training observations only; the withheld
-    cross-validation points are excluded from calibration and used as a quality
-    gate before the correction is enabled.
     """
     os.makedirs(out_dir, exist_ok=True)
     opts = dineof_kwargs.copy() if dineof_kwargs else {}
@@ -759,6 +1055,9 @@ def run_reconstruction_pipeline(
         opts['use_disk'] = use_disk
     if 'solver' not in opts:
         opts['solver'] = solver
+
+    do_refine = opts.pop('apply_local_refinement', apply_local_refinement)
+    refine_sigma = opts.pop('local_refinement_sigma', local_refinement_sigma)
 
     X_input, mask_2d, coords_meta = load_netcdf_masked(
         file_path=input_nc,
@@ -779,7 +1078,7 @@ def run_reconstruction_pipeline(
             print(f"    [Date Filter] Setting {n_blanked} dates below {min_valid_ratio:.1%} coverage to NaN (preserved for reconstruction).")
             X_input[:, low_coverage] = np.nan
 
-    X_raw_observations = X_input.copy() if opts.get('keep_observations', True) else None
+    X_raw_observations = X_input.copy()
 
     print("\n-> Launching DINEOF core engine...")
 
@@ -794,6 +1093,31 @@ def run_reconstruction_pipeline(
 
     truth_cv = meta['cv_truth']
     pred_cv = meta['cv_pred'].copy()
+
+    # --- Cross-Validation Arbitration & Local Spatial Refinement ---
+    if do_refine:
+        sigmas_to_test = [refine_sigma] if (refine_sigma is not None) else [1.5, 2.5, 3.5, 5.0, 7.0]
+        validated, opt_sigma, pred_cv_refined = arbitrate_local_residual_refinement(
+            X_rec=X_final,
+            X_raw_obs=X_raw_observations,
+            mask_2d=mask_2d,
+            dineof_meta=meta,
+            candidate_sigmas=sigmas_to_test,
+            is_log_scale=apply_log
+        )
+
+        if validated and opt_sigma is not None:
+            pred_cv = pred_cv_refined
+            print(f"   [Post-Process] Applying local residual refinement with validated sigma={opt_sigma:.1f} px...")
+            X_final = apply_local_residual_refinement_2d(
+                X_rec=X_final,
+                X_raw_obs=X_raw_observations,
+                mask_2d=mask_2d,
+                sigma_spatial_pixels=opt_sigma,
+                is_log_scale=apply_log
+            )
+        else:
+            print("   [Post-Process] Local residual refinement deactivated by CV arbitration gate.")
 
     cv_r = meta['cv_rows']
     cv_c = meta['cv_cols']
@@ -912,6 +1236,8 @@ def run_reconstruction_pipeline(
                 pred_cv = pred_cv_qmap
 
     out_nc = os.path.join(out_dir, f"DINEOF_Reconstructed_{var_name}.nc")
+    X_stream_obs = X_raw_observations if opts.get('keep_observations', True) else None
+
     mean_spatial_err, mean_spatial_rel, temporal_err_mean = stream_reconstruction_and_oi_netcdf(
         out_path=out_nc,
         X_rec=X_final,
@@ -923,7 +1249,7 @@ def run_reconstruction_pipeline(
         apply_qmap=apply_qmap,
         q_rec=q_rec,
         q_obs=q_obs,
-        X_raw_obs=X_raw_observations,
+        X_raw_obs=X_stream_obs,
         vmax=vmax
     )
 
