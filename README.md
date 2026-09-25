@@ -157,7 +157,7 @@ $$\Delta_{\text{qmap},\ln}(m, t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\t
 
 **Operational Safeguards:**
 
-* **Data-leakage-free calibration**: Transfer functions $\mathcal{Q}_{\text{obs}} \text{ and } \mathcal{F}_{\text{rec}}$ are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
+* **Data-leakage-free calibration**: Transfer functions $\mathcal{Q}$<sub>obs</sub> and $\mathcal{F}$<sub>rec</sub> are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
 * **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If performance degrades:
 
 $$\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}$$
