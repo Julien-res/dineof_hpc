@@ -1080,6 +1080,11 @@ def run_reconstruction_pipeline(
 
     X_raw_observations = X_input.copy()
 
+    user_keep_obs = opts.get('keep_observations', True)
+    opts_core = opts.copy()
+    if do_refine:
+        opts_core['keep_observations'] = False
+
     print("\n-> Launching DINEOF core engine...")
 
     X_final, meta = dineof(
@@ -1088,7 +1093,7 @@ def run_reconstruction_pipeline(
         mask=mask_2d,
         apply_log=apply_log,
         use_climatology=use_climatology,
-        **opts
+        **opts_core
     )
 
     truth_cv = meta['cv_truth']
@@ -1118,6 +1123,14 @@ def run_reconstruction_pipeline(
             )
         else:
             print("   [Post-Process] Local residual refinement deactivated by CV arbitration gate.")
+
+    # Strictly enforce user observation preference on the final reconstructed matrix
+    if user_keep_obs:
+        print("   [Post-Process] Restoring genuine raw satellite observations to valid pixels...")
+        valid_obs_mask = np.isfinite(X_raw_observations)
+        X_final[valid_obs_mask] = X_raw_observations[valid_obs_mask]
+    
+    meta['keep_observations'] = user_keep_obs
 
     cv_r = meta['cv_rows']
     cv_c = meta['cv_cols']
