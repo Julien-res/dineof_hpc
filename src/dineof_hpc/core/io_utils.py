@@ -803,11 +803,14 @@ def stream_reconstruction_and_oi_netcdf(
             else:
                 rec_final_t = rec_t.copy()
 
-            if vmax is not None:
-                rec_final_t = np.minimum(rec_final_t, vmax)
+
 
             if keep_obs:
                 rec_final_t[obs_mask_t] = rec_t[obs_mask_t]
+
+            if vmax is not None:
+                print(f"   [NetCDF Streaming] Applying upper bound {vmax} to reconstructed values.")
+                rec_final_t = np.minimum(rec_final_t, vmax)
 
             buf_data.fill(np.nan)
             buf_data[mask_2d] = rec_final_t
@@ -1079,6 +1082,10 @@ def run_reconstruction_pipeline(
             X_input[:, low_coverage] = np.nan
 
     X_raw_observations = X_input.copy()
+    if vmax is not None:
+        print(f"    [Pre-Process] Applying upper bound of {vmax} to raw observations...")
+        X_raw_observations[X_raw_observations > vmax] = np.nan
+        X_input[X_input > vmax] = np.nan
 
     user_keep_obs = opts.get('keep_observations', True)
     opts_core = opts.copy()
