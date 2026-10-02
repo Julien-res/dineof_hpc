@@ -809,7 +809,6 @@ def stream_reconstruction_and_oi_netcdf(
                 rec_final_t[obs_mask_t] = rec_t[obs_mask_t]
 
             if vmax is not None:
-                print(f"   [NetCDF Streaming] Applying upper bound {vmax} to reconstructed values.")
                 rec_final_t = np.minimum(rec_final_t, vmax)
 
             buf_data.fill(np.nan)
