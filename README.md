@@ -361,7 +361,7 @@ DINE_OPTS = {
     'nitemax': 300,
     'alpha': 0.005,
     'numit': 3,
-    'cv_ratio': 0.01,
+    'cv_ratio': 0.02,
     'cv_patch_size': 11,
     'subsample_ratio': 0.1,  # Subsample covariance on massive grids
     'use_disk': False,        # Fast in-memory execution on high-RAM nodes
@@ -421,7 +421,7 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `nitemax` | `int` | `300` | Maximum iterations permitted per mode. |
 | `alpha` | `float` | `0.005` | 1D implicit Laplacian temporal diffusion coefficient. |
 | `numit` | `int` | `3` | Number of diffusion iterations applied to the covariance matrix. |
-| `cv_ratio` | `float` | `0.01` | Fraction of valid observations withheld for spatial patch cross-validation. |
+| `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld for spatial patch cross-validation. |
 | `cv_patch_size` | `int` | `11` | Side length in pixels of 2D evaluation cloud patches. |
 | `cv_max_points` | `int` or `None` | `500_000` | Maximum evaluation points ceiling to prevent memory bottlenecks. |
 | `cv_patience` | `int` | `3` | Consecutive modes with increasing CV error before triggering early stopping. |

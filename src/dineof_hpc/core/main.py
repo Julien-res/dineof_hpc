@@ -721,7 +721,7 @@ def dineof(
     nitemax: int = 300,
     alpha: float = 0.005,
     numit: int = 3,
-    cv_ratio: float = 0.01,
+    cv_ratio: float = 0.02,
     cv_patch_size: int = 11,
     cv_max_points: int | None = 500_000,
     cv_patience: int = 3,
