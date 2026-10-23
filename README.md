@@ -424,7 +424,7 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld for spatial patch cross-validation. |
 | `cv_patch_size` | `int` | `11` | Side length in pixels of 2D evaluation cloud patches. |
 | `cv_max_points` | `int` or `None` | `500_000` | Maximum evaluation points ceiling to prevent memory bottlenecks. |
-| `cv_patience` | `int` | `3` | Consecutive modes with increasing CV error before triggering early stopping. |
+| `cv_patience` | `int` | `3` | Number of explored modes without a new CV minimum before early stopping. |
 | `n_cv_runs` | `int` | `3` | Number of disjoint evaluation patch sets. |
 | `min_improvement`| `float` | `0.0` | Minimum relative CV gain required to justify higher mode increments. |
 | `subsample_ratio`| `float` | `1.0` | Spatial subsampling fraction for temporal covariance calculation (1.0 = exact). |
