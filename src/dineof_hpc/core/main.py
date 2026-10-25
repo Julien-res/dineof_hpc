@@ -22,8 +22,10 @@ Mathematical & Methodological References:
 
 from __future__ import annotations
 
+import functools
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -32,10 +34,20 @@ from joblib import cpu_count
 from scipy.sparse.linalg import eigsh
 
 try:
+    import numba
     from numba import jit, prange
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
+try:
+    from threadpoolctl import threadpool_limits
+except ImportError:
+    threadpool_limits = None
+
+# Number of workers for the row-split covariance product; set by dineof().
+_GRAM_WORKERS = 1
+_GRAM_POOL: ThreadPoolExecutor | None = None
 
 
 # =============================================================================
@@ -196,6 +208,29 @@ def _resolve_solver(solver: str, N: int, nev: int) -> str:
     return 'dense' if N <= n_crossover else 'lanczos'
 
 
+def _row_split_gram(A: NDArray[np.float32], n_workers: int) -> NDArray[np.float32]:
+    """Compute ``A.T @ A`` as a sum of row-block products evaluated in parallel.
+
+    BLAS parallelizes this product over the short time dimension and barely
+    scales with threads. Splitting the rows instead, with single-threaded BLAS
+    per block, scales almost linearly up to the number of physical cores.
+    """
+    global _GRAM_POOL
+    if _GRAM_POOL is None or _GRAM_POOL._max_workers != n_workers:
+        _GRAM_POOL = ThreadPoolExecutor(max_workers=n_workers)
+    edges = np.linspace(0, A.shape[0], n_workers + 1).astype(np.int64)
+
+    def block(k: int) -> NDArray[np.float32]:
+        A_k = A[edges[k]:edges[k + 1]]
+        return A_k.T @ A_k
+
+    parts = list(_GRAM_POOL.map(block, range(n_workers)))
+    B = parts[0]
+    for part in parts[1:]:
+        B += part
+    return B
+
+
 def _parallel_AtA(
     A: NDArray[np.float32],
     idx_sub: NDArray[np.int64] | None = None,
@@ -223,6 +258,8 @@ def _parallel_AtA(
         A_work = A
         scale = 1.0
 
+    if _GRAM_WORKERS > 1 and A_work.shape[0] >= 4 * _GRAM_WORKERS:
+        return _row_split_gram(A_work, _GRAM_WORKERS) * scale
     return (A_work.T @ A_work) * scale
 
 
@@ -477,6 +514,71 @@ def _jit_reconstruct_and_update(
     return diff_sq
 
 
+@jit(nopython=True, fastmath=True, nogil=True)
+def _block_project_update(
+    Xa: NDArray[np.float32],
+    v: NDArray[np.float32],
+    mask: NDArray[np.bool_],
+    i0: int,
+    i1: int,
+    proj: NDArray[np.float32]
+) -> float:
+    """Project rows ``i0:i1`` on the temporal modes and replace their masked values.
+
+    Serial worker of :func:`_jit_fused_update`; ``proj`` is a scratch buffer of
+    length ``nev`` reused across the rows of the block.
+    """
+    N = Xa.shape[1]
+    nev = v.shape[1]
+    acc = 0.0
+    for i in range(i0, i1):
+        has_miss = False
+        for t in range(N):
+            if mask[i, t]:
+                has_miss = True
+                break
+        if not has_miss:
+            continue
+        for l in range(nev):
+            proj[l] = 0.0
+        for t in range(N):
+            x = Xa[i, t]
+            for l in range(nev):
+                proj[l] += x * v[t, l]
+        for t in range(N):
+            if mask[i, t]:
+                val = np.float32(0.0)
+                for l in range(nev):
+                    val += proj[l] * v[t, l]
+                diff = val - Xa[i, t]
+                acc += diff * diff
+                Xa[i, t] = val
+    return acc
+
+
+@jit(nopython=True, parallel=True, fastmath=True, nogil=True)
+def _jit_fused_update(
+    Xa: NDArray[np.float32],
+    v: NDArray[np.float32],
+    mask: NDArray[np.bool_],
+    block: int
+) -> float:
+    """Project and reconstruct missing values in one parallel pass.
+
+    Equivalent to ``Xa @ v`` followed by :func:`_jit_reconstruct_and_update`,
+    but the projection runs inside the Numba thread pool, so BLAS and Numba
+    threads never compete for the cores.
+    """
+    M = Xa.shape[0]
+    nev = v.shape[1]
+    n_blocks = (M + block - 1) // block
+    partial = np.zeros(n_blocks)
+    for b in prange(n_blocks):
+        proj = np.empty(nev, dtype=np.float32)
+        partial[b] = _block_project_update(Xa, v, mask, b * block, min(b * block + block, M), proj)
+    return partial.sum()
+
+
 def _parallel_update_orchestrator(
     Xa: NDArray[np.float32],
     v: NDArray[np.float32],
@@ -492,8 +594,13 @@ def _parallel_update_orchestrator(
     """
     M, N = Xa.shape
     v_active = v[:, :nev]
-    v_active_T = np.ascontiguousarray(v_active.T)
 
+    # In-memory matrices use the fused kernel; memmaps keep the chunked path
+    # so that only one chunk is paged in at a time.
+    if not isinstance(Xa, np.memmap):
+        return float(_jit_fused_update(Xa, np.ascontiguousarray(v_active), mask_miss, 256))
+
+    v_active_T = np.ascontiguousarray(v_active.T)
     chunk_size = buf_proj.shape[0]
     diff_sq_total = 0.0
 
@@ -708,6 +815,40 @@ def select_cv_blocks_multi(
 #                                CORE DINEOF PIPELINE
 # =============================================================================
 
+def _thread_controlled(func):
+    """Run :func:`dineof` with one compute pool sized to the physical cores.
+
+    Numba runs the updates and the row-split covariance uses as many workers,
+    while BLAS is kept single-threaded inside the call: idle BLAS threads
+    otherwise compete with Numba and collapse performance on hyper-threaded or
+    hybrid CPUs.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        global _GRAM_WORKERS
+        n_threads = kwargs.get('n_threads')
+        if n_threads is None:
+            n_threads = int(os.environ.get('NUMBA_NUM_THREADS') or cpu_count(only_physical_cores=True))
+        n_prev = numba.get_num_threads() if HAS_NUMBA else 1
+        n_max = numba.config.NUMBA_NUM_THREADS if HAS_NUMBA else int(n_threads)
+        n_threads = max(1, min(int(n_threads), n_max))
+        gram_prev = _GRAM_WORKERS
+        _GRAM_WORKERS = n_threads
+        if HAS_NUMBA:
+            numba.set_num_threads(n_threads)
+        try:
+            if threadpool_limits is not None:
+                with threadpool_limits(limits=1, user_api='blas'):
+                    return func(*args, **kwargs)
+            return func(*args, **kwargs)
+        finally:
+            _GRAM_WORKERS = gram_prev
+            if HAS_NUMBA:
+                numba.set_num_threads(n_prev)
+    return wrapper
+
+
+@_thread_controlled
 def dineof(
     data: NDArray[np.float32],
     time_coords: NDArray | None = None,
@@ -733,6 +874,7 @@ def dineof(
     verbose: bool = True,
     use_disk: bool = False,
     solver: str = 'dense',
+    n_threads: int | None = None,
     debug: bool = False
 ) -> tuple[NDArray[np.float32], dict]:
     """Reconstruct missing values with iterative DINEOF and cross-validation.
@@ -802,6 +944,10 @@ def dineof(
         RAM usage. The returned output may also be a memmap.
     solver : str, default='dense'
         Choice of solver ('auto', 'dense', 'lanczos', 'randomized').
+    n_threads : int or None, default=None
+        Compute threads for the updates and the covariance product. ``None``
+        uses ``NUMBA_NUM_THREADS`` if set, otherwise the number of physical
+        cores. BLAS stays single-threaded during the call.
     debug : bool, default=False
         Collect fine-grained timings in ``meta['timings']``.
 
