@@ -433,7 +433,7 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `verbose` | `bool` | `True` | Prints iteration counts, explained variance, and pooled RMSE to console. |
 | `use_disk` | `bool` | `False` | Enables disk caching via `numpy.memmap`. Keep `False` on high-memory nodes (>= 256 GB RAM). |
 | `solver` | `str` | `'auto'` | Eigensolver selection (`'auto'`, `'dense'`, `'lanczos'`, `'randomized'`). |
-| `n_threads` | `int` or `None` | `None` | Compute threads for the updates and the covariance product. `None` uses `NUMBA_NUM_THREADS` if set, otherwise the number of physical cores. BLAS stays single-threaded during the call. |
+| `n_threads` | `int` or `None` | `None` | Compute threads for the updates and the covariance product. `None` uses `NUMBA_NUM_THREADS` if set, otherwise one thread per `DINEOF_ELEMS_PER_THREAD` elements of the sea-pixel x time matrix (default 500,000), capped by the larger of the physical cores and three quarters of the CPUs available to the process. BLAS stays single-threaded during the call. |
 | `debug` | `bool` | `False` | Enables timing profiling across covariance, SVD, update, and CV stages. |
 
 ### 2. High-Level Pipeline: `run_reconstruction_pipeline(...)`

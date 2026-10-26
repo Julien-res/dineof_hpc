@@ -815,8 +815,33 @@ def select_cv_blocks_multi(
 #                                CORE DINEOF PIPELINE
 # =============================================================================
 
+def _auto_threads(args, kwargs) -> int:
+    """Thread count for a problem of M sea pixels by N dates.
+
+    One thread per ``DINEOF_ELEMS_PER_THREAD`` matrix elements (default 500_000),
+    capped by the larger of the physical cores and three quarters of the CPUs available to the process. Small or long-series problems lose time in thread
+    synchronization and in row blocks too short for the covariance product, so they
+    get fewer threads.
+    """
+    data = kwargs.get('data', args[0] if args else None)
+    mask = kwargs.get('mask', args[2] if len(args) > 2 else None)
+    shape = np.shape(data)
+    if len(shape) == 3:
+        n_rows = int(np.count_nonzero(mask)) if mask is not None else int(shape[1] * shape[2])
+        n_elems = n_rows * int(shape[0])
+    else:
+        n_elems = int(np.prod(shape))
+    per_thread = int(os.environ.get('DINEOF_ELEMS_PER_THREAD') or 500_000)
+    try:
+        n_avail = len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on Windows or macOS
+        n_avail = cpu_count()
+    cap = max(cpu_count(only_physical_cores=True), n_avail * 3 // 4)
+    return int(max(1, min(n_elems // per_thread, cap)))
+
+
 def _thread_controlled(func):
-    """Run :func:`dineof` with one compute pool sized to the physical cores.
+    """Run :func:`dineof` with one compute pool sized to the problem.
 
     Numba runs the updates and the row-split covariance uses as many workers,
     while BLAS is kept single-threaded inside the call: idle BLAS threads
@@ -827,8 +852,10 @@ def _thread_controlled(func):
     def wrapper(*args, **kwargs):
         global _GRAM_WORKERS
         n_threads = kwargs.get('n_threads')
+        if n_threads is None and os.environ.get('NUMBA_NUM_THREADS'):
+            n_threads = int(os.environ['NUMBA_NUM_THREADS'])
         if n_threads is None:
-            n_threads = int(os.environ.get('NUMBA_NUM_THREADS') or cpu_count(only_physical_cores=True))
+            n_threads = _auto_threads(args, kwargs)
         n_prev = numba.get_num_threads() if HAS_NUMBA else 1
         n_max = numba.config.NUMBA_NUM_THREADS if HAS_NUMBA else int(n_threads)
         n_threads = max(1, min(int(n_threads), n_max))
@@ -946,8 +973,10 @@ def dineof(
         Choice of solver ('auto', 'dense', 'lanczos', 'randomized').
     n_threads : int or None, default=None
         Compute threads for the updates and the covariance product. ``None``
-        uses ``NUMBA_NUM_THREADS`` if set, otherwise the number of physical
-        cores. BLAS stays single-threaded during the call.
+        uses ``NUMBA_NUM_THREADS`` if set, otherwise one thread per
+        ``DINEOF_ELEMS_PER_THREAD`` elements of the sea-pixel x time matrix
+        (default 500_000), capped by the larger of the physical cores and three quarters of the CPUs available to the process. BLAS stays
+        single-threaded during the call.
     debug : bool, default=False
         Collect fine-grained timings in ``meta['timings']``.
 
