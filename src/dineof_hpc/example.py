@@ -37,7 +37,7 @@ JOBS = [
         "vmax": None,                # Optional upper bound for reconstructed values.
         "apply_log": True,           # Use for strictly positive environmental data.
         "use_climatology": True,     # Remove and restore the temporal pixel mean.
-        "apply_qmap": True,          # Apply uncertainty-weighted quantile mapping.
+        "apply_qmap": False,         # Opt-in: no measurable benefit in benchmarks (see README §5).
     }
 ]
 

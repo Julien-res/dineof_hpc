@@ -991,7 +991,7 @@ def run_reconstruction_pipeline(
     min_valid_ratio: float = 0.01,
     apply_log: bool = True,
     use_climatology: bool = True,
-    apply_qmap: bool = True,
+    apply_qmap: bool = False,
     qmap_nb_quantiles: int = 100,
     apply_local_refinement: bool = False,
     local_refinement_sigma: float | None = None,

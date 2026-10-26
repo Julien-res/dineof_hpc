@@ -51,7 +51,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 | **Post-Validation Convergence** | Restores CV points and iterates until `toliter`. | Restores CV points and iterates until `toliter`. | Protocol maintained; out-of-sample predictions frozen at $k_{\text{opt}}$ before the final pass, preventing leakage. Optimal state cached on disk via `memmap`. |
 | **Uncertainty Estimation (OI)** | Companion routine (`dineof_error.f90`). | Not implemented. | Analytical reduced-subspace OI analysis error - see [§3](#3-in-stream-optimal-interpolation-oi-analysis-error). |
 | **Log-Normal Error Derivation** | Not implemented. | Not implemented. | Exact analytical formulation - see [§4](#4-exact-analytical-physical-error-for-log-normal-distributions). |
-| **Distribution Mapping (Q-Map)** | Not implemented. | Not implemented. | In-stream Quantile Mapping with KGE arbitration gate - see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate). |
+| **Distribution Mapping (Q-Map)** | Not implemented. | Not implemented. | Optional (off by default) in-stream Quantile Mapping with KGE arbitration gate; no measurable benefit in our benchmarks - see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate). |
 | **Local Spatial Autocorrelation**| Not implemented (purely global EOF modes). | Not implemented (purely global EOF modes). | Normalized 2D Barnes objective analysis of spatial observation residuals with CV support gating - see [§6](#6-local-residual-objective-analysis-barnes-refinement). |
 | **Observation Preservation** | Binary substitution (`keep_obs=True` only). | Binary substitution (`keep_obs=True` only). | Dual-mode: strict gap-filling or seamless filtered EOF continuum - see [Implementation Details](#implementation-details). |
 
@@ -137,7 +137,11 @@ where the log-space error variance is scaled by the observational noise variance
 $$\sigma_{\ln}^{2}(m, t) = \sigma_{o}^{2} \cdot r_{t}(m) = \sigma_{o}^{2} \cdot \frac{[P_{t}]_{mm}}{[B]_{mm}}$$
 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
-Variance attenuation in unconstrained cloudy areas is corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) \in [0, 1]$:
+Variance attenuation in unconstrained cloudy areas can be corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) \in [0, 1]$.
+
+> **Status: optional, disabled by default (`apply_qmap=False`).** Independent-test benchmarks over 12 cases (several zones, resolutions and seeds) show that Q-Map has no measurable effect on the test RMSE (< 0.2 %), and the KGE gate accepts or rejects it essentially at random. Even with a calibrated error weighting the effect remains null, and without the $r_t$ weighting it degrades the reconstruction by 2 to 8 %. Its usefulness is therefore not demonstrated: enable it explicitly and validate it on your own data before relying on it.
+
+The formulation below applies when it is enabled:
 
 **Linear scale (`apply_log=False`):**
 
@@ -162,7 +166,7 @@ $$\Delta_{\text{qmap},\ln}(m, t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\t
 
 $$\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}$$
 
-quantile mapping is automatically deactivated to prevent artificial variance over-inflation.
+quantile mapping is automatically deactivated to prevent artificial variance over-inflation (in our tests this gate was not a reliable predictor of the independent-test benefit).
 * **Bounded extrapolation slopes**: High-quantile extrapolation is bounded ($\text{slope}_{\text{right}} \in [0.0, 1.0]$) in log space to avoid runaway under persistent cloud cover while preserving physical flood peaks.
 
 ### 6. Local Residual Objective Analysis (Barnes Refinement)
@@ -270,7 +274,7 @@ dineof_hpc/
        | 1. Precompute stationary background variance B_diag         |
        | 2. Optional Barnes local residual refinement (2D Gaussian)  |
        | 3. Cross-validation arbitration gate (support-masked CV)    |
-       | 4. Calibrate Quantile Mapping (training observations only)  |
+       | 4. Optional: calibrate Quantile Mapping (apply_qmap=True)   |
        | 5. Evaluate KGE arbitration gate (deactivate if degraded)   |
        | 6. Stream NetCDF slices (reduced OI dual error P_t, comp=1) |
        | 7. Export validation metrics (CSV) and 6-panel dashboard    |
@@ -377,7 +381,7 @@ run_reconstruction_pipeline(
     min_valid_ratio=0.01,
     apply_log=True,           # Suitable for log-normal environmental tracers
     use_climatology=True,
-    apply_qmap=True,          # Calibrate Quantile Mapping on training observations
+    apply_qmap=False,         # Optional, off by default (no demonstrated benefit, see §5)
     apply_local_refinement=True, # Restore localized front gradients
     local_refinement_sigma=None, # Auto-select optimal scale via CV arbitration gate
     dineof_kwargs=DINE_OPTS
@@ -451,7 +455,7 @@ Defined in `io_utils.py`, coordinates file-to-file batch reconstruction with str
 | `min_valid_ratio` | `float` | `0.01` | Coverage threshold below which dates are blanked to `NaN` and fully reconstructed (`0.0` leaves raw measurements intact). |
 | `apply_log` | `bool` | `True` | Applies logarithmic transformation inside the engine (for log-normal tracers). |
 | `use_climatology` | `bool` | `True` | Applies per-pixel climatological centering. |
-| `apply_qmap` | `bool` | `True` | Enables uncertainty-modulated Quantile Mapping. |
+| `apply_qmap` | `bool` | `False` | Enables uncertainty-modulated Quantile Mapping (opt-in; no demonstrated benefit, see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate)). |
 | `qmap_nb_quantiles` | `int` | `100` | Number of quantile evaluation bins. |
 | `apply_local_refinement` | `bool` | `False` | Enables post-reconstruction Barnes local residual objective analysis. |
 | `local_refinement_sigma` | `float` or `None` | `None` | Standard deviation in pixels of the Gaussian kernel for residual refinement. If `None`, candidate scales $[1.5, 2.5, 3.5, 5.0, 7.0]$ are arbitrated via cross-validation. |
