@@ -331,7 +331,8 @@ def _ssvd_spectral(
     idx_sub: NDArray[np.int64] | None = None,
     scale: float = 1.0,
     solver: str = 'auto',
-    seed: int | None = 42
+    seed: int | None = 42,
+    shrink: NDArray[np.float32] | None = None
 ) -> tuple[NDArray[np.float32] | None, NDArray[np.float32], NDArray[np.float32]]:
     """Compute leading EOF modes from the temporal covariance matrix.
 
@@ -365,6 +366,11 @@ def _ssvd_spectral(
         Covariance scaling factor associated with ``idx_sub``.
     seed : int or None
         Random seed for subsampling reproducibility.
+    shrink : NDArray[np.float32] or None
+        Optional output array of length ``>= nev``. With ``alpha > 0`` it receives, for each mode,
+        ``sqrt(lambda_filtered / v'Bv)`` (``B`` unfiltered): the factor by which the reference
+        DINEOF scales each mode, because its singular value is ``sqrt(lambda_filtered)``. It is set
+        to 1 when ``alpha == 0``.
     solver : str, default='dense'
         Eigensolver algorithm:
         - 'dense' : LAPACK syevr with subset_by_index (exact MRRR solver).
@@ -385,6 +391,7 @@ def _ssvd_spectral(
     N = A.shape[1]
     B = _parallel_AtA(A, idx_sub=idx_sub, scale=scale)
 
+    B_unfiltered = B if (alpha > 0.0 and shrink is not None) else None
     if alpha > 0.0:
         B = _get_diff(B, arr_time, alpha, numit)
         B = _get_diff(B, arr_time, alpha, numit)
@@ -416,6 +423,14 @@ def _ssvd_spectral(
         v[:, :nev] = np.flip(eigenvectors, axis=1)
         eigenvalues_active = np.flip(eigenvalues)
 
+    if shrink is not None:
+        shrink[:nev] = 1.0
+        if B_unfiltered is not None:
+            vk = v[:, :nev].astype(np.float64)
+            var_raw = np.einsum('ij,ij->j', vk, B_unfiltered.astype(np.float64) @ vk)
+            lam = np.maximum(np.asarray(eigenvalues_active[:nev], dtype=np.float64), 0.0)
+            shrink[:nev] = np.sqrt(lam / np.maximum(var_raw, 1e-30))
+
     if compute_u and (u is not None):
         U_unscaled = A @ v[:, :nev]
         u[:, :nev] = 0.0
@@ -423,7 +438,7 @@ def _ssvd_spectral(
             norm_u = float(np.linalg.norm(U_unscaled[:, idx]))
             if norm_u > 1e-9:
                 u[:, idx] = U_unscaled[:, idx] / norm_u
-                s[idx] = norm_u
+                s[idx] = norm_u * (float(shrink[idx]) if shrink is not None else 1.0)
             else:
                 s[idx] = 0.0
     else:
@@ -586,6 +601,7 @@ def _parallel_update_orchestrator(
     mask_miss: NDArray[np.bool_],
     buf_proj: NDArray[np.float32],
     buf_rec: NDArray[np.float32],
+    shrink: NDArray[np.float32] | None = None,
 ) -> float:
     """Project and reconstruct missing values chunk by chunk.
 
@@ -594,6 +610,10 @@ def _parallel_update_orchestrator(
     """
     M, N = Xa.shape
     v_active = v[:, :nev]
+    if shrink is not None:
+        # Projection and reconstruction reuse the same basis, so scaling it by sqrt(shrink)
+        # scales each mode's contribution by shrink (reference DINEOF convention).
+        v_active = (v_active * np.sqrt(shrink[:nev])[None, :]).astype(np.float32)
 
     # In-memory matrices use the fused kernel; memmaps keep the chunked path
     # so that only one chunk is paged in at a time.
@@ -887,7 +907,7 @@ def dineof(
     nev: int | None = None,
     toliter: float = 1e-3,
     nitemax: int = 300,
-    alpha: float = 0.005,
+    alpha: float = 0.01,
     numit: int = 3,
     cv_ratio: float = 0.02,
     cv_patch_size: int = 11,
@@ -1162,6 +1182,7 @@ def dineof(
 
     buf_proj = np.empty((chunk_size, nev), dtype=np.float32)
     buf_rec = np.empty((chunk_size, N), dtype=np.float32)
+    shrink = np.ones((nev,), dtype=np.float32)
 
     scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER', '/tmp')
 
@@ -1199,8 +1220,8 @@ def dineof(
         print("   [5/5] Performing progressive initialization (Mode 1 warm-up pass)...")
     t0_step = time.perf_counter()
     _ssvd_spectral(Xa, 1, arr_time, alpha, numit, u, s, v, compute_u=False,
-               idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed)
-    _parallel_update_orchestrator(Xa, v, 1, mask_miss, buf_proj, buf_rec)
+               idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
+    _parallel_update_orchestrator(Xa, v, 1, mask_miss, buf_proj, buf_rec, shrink)
     if verbose:
         print(f"\nDINEOF engine ready: {M} spatial points x {N} dates.")
         print(f"Cross-validation: {len(patches)} patch sets ({total_cv_points} masked evaluation points).")
@@ -1224,13 +1245,13 @@ def dineof(
             if debug:
                 t0_op = time.perf_counter()
             _ssvd_spectral(Xa, p + 1, arr_time, alpha, numit, u, s, v, compute_u=False,
-               idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed)
+               idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
             if debug:
                 t_mode_svd += time.perf_counter() - t0_op
 
             if debug:
                 t0_op = time.perf_counter()
-            diff_sq = _parallel_update_orchestrator(Xa, v, p + 1, mask_miss, buf_proj, buf_rec)
+            diff_sq = _parallel_update_orchestrator(Xa, v, p + 1, mask_miss, buf_proj, buf_rec, shrink)
             if debug:
                 t_mode_update += time.perf_counter() - t0_op
 
@@ -1310,8 +1331,8 @@ def dineof(
     final_iters = 0
     for nite in range(nitemax):
         _ssvd_spectral(Xa, n_opt, arr_time, alpha, numit, u, s, v, compute_u=False,
-                    idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed)
-        diff_sq = _parallel_update_orchestrator(Xa, v, n_opt, mask_miss, buf_proj, buf_rec)
+                    idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
+        diff_sq = _parallel_update_orchestrator(Xa, v, n_opt, mask_miss, buf_proj, buf_rec, shrink)
         final_iters = nite + 1
         if float(np.sqrt(diff_sq / n_miss) / stdvini) < toliter:
             break
@@ -1320,7 +1341,7 @@ def dineof(
     # Compute the final normalized spatial EOFs and singular values.
     t0_step = time.perf_counter()
     u, s, v = _ssvd_spectral(Xa, n_opt, arr_time, alpha, numit, u, s, v, compute_u=True,
-                         idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed)
+                         idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
 
     if not keep_observations:
         u_scaled = u[:, :n_opt] * s[:n_opt]

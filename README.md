@@ -99,6 +99,8 @@ $$(I - \alpha L) B^{n+1} = B^{n}$$
 
 Using variable intervals $\Delta t_{i} = t_{i+1} - t_{i}$, cell widths use half-cell boundaries ($\Delta t_{e,0} = 0.5 \Delta t_{0}$, $\Delta t_{e,N-1} = 0.5 \Delta t_{N-2}$, $\Delta t_{e,i} = 0.5(\Delta t_{i-1} + \Delta t_{i})$ elsewhere). Symmetrization $\tilde{B}_{\text{sym}} = 0.5(\tilde{B} + \tilde{B}^{T})$ guarantees self-adjointness.
 
+As in the reference DINEOF, the singular value of a mode is the square root of the eigenvalue of the *filtered* matrix, with $U = AV/\|AV\|$. Each mode is therefore scaled by $\sqrt{\lambda_{\text{filtered}}/(v^{T}Bv)}$ (equal to 1 when `alpha = 0`) in both the EM update and the final reconstruction. Without this factor the iteration does not converge for `alpha > 0` and the cross-validation curve rises after a few modes; with it the curve is flat after its minimum, as in the reference code.
+
 ### 2. Spatial Patch Hold-out & Pooled RMSE
 Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE:
 
@@ -341,7 +343,7 @@ X_rec, meta = dineof(
     time_coords=time_coords,
     nev=10,
     toliter=1e-3,
-    alpha=0.005,
+    alpha=0.01,
     numit=3,
     subsample_ratio=0.2,
     verbose=True
@@ -363,7 +365,7 @@ DINE_OPTS = {
     'nev': 30,
     'toliter': 1e-3,
     'nitemax': 300,
-    'alpha': 0.005,
+    'alpha': 0.01,
     'numit': 3,
     'cv_ratio': 0.02,
     'cv_patch_size': 11,
@@ -423,7 +425,7 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `nev` | `int` or `None` | `None` | Maximum EOF modes to explore (`nev < N`). If `None`, estimated via `_estimate_nev`. |
 | `toliter` | `float` | `1e-3` | Relative iteration RMS convergence threshold: $\text{RMS}(dx)/\text{stdvini}$. |
 | `nitemax` | `int` | `300` | Maximum iterations permitted per mode. |
-| `alpha` | `float` | `0.005` | 1D implicit Laplacian temporal diffusion coefficient. |
+| `alpha` | `float` | `0.01` | 1D implicit Laplacian temporal diffusion coefficient (units: days², `time_coords` in days). `0` disables the filter. When `alpha > 0` each mode is also scaled by $\sqrt{\lambda_{\text{filtered}} / v^{T}Bv}$, the reference DINEOF convention (see §1). On our benchmarks `0.01` helps strongly on daily series (Z1, Z2) and is neutral to slightly harmful on 5-day series (Z3); use `0` for very sparse dates. |
 | `numit` | `int` | `3` | Number of diffusion iterations applied to the covariance matrix. |
 | `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld for spatial patch cross-validation. |
 | `cv_patch_size` | `int` | `11` | Side length in pixels of 2D evaluation cloud patches. |
