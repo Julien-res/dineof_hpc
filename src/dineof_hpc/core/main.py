@@ -668,7 +668,8 @@ def compute_dineof_oi_error_step(
     N_time : int
         Total number of temporal steps in the dataset.
     sigma_o : float
-        Estimated observation noise standard deviation (optimal CV RMSE).
+        Observation noise standard deviation: the optimal CV RMSE, inflated by ``sqrt(L^2 / (dx dy))`` for
+        spatially correlated errors (see ``io_utils.effective_obs_sigma``).
     obs_mask_t : NDArray[np.bool_]
         Boolean observation mask at time step t (True for valid physical observations).
     buf_Uk_invA : NDArray[np.float32] or None
@@ -685,7 +686,7 @@ def compute_dineof_oi_error_step(
     Returns
     -------
     err_var : NDArray[np.float32]
-        Analysis error variance array of length M ([P_t]_{mm}).
+        Absolute analysis error variance array of length M ([P_t]_{mm}), in the units of the reconstruction space.
     rel_err : NDArray[np.float32]
         Relative error ratio array of length M (r_t(m) = [P_t]_{mm} / [B]_{mm} in [0, 1]).
     """

@@ -669,6 +669,140 @@ def fit_quantile_transfer_training(
     return q_rec.astype(np.float32), q_obs.astype(np.float32)
 
 
+def estimate_pixel_area_km2(lat: np.ndarray, lon: np.ndarray) -> float | None:
+    """Pixel area (km^2) deduced from 1D or 2D coordinates: degrees (|lat| <= 90) or projected metres."""
+    lat = np.asarray(lat, dtype=np.float64)
+    lon = np.asarray(lon, dtype=np.float64)
+    if lat.ndim == 2:
+        lat, lon = lat[:, 0], lon[0, :]
+    if lat.size < 2 or lon.size < 2:
+        return None
+    dlat = float(np.median(np.abs(np.diff(lat))))
+    dlon = float(np.median(np.abs(np.diff(lon))))
+    if not (dlat > 0 and dlon > 0):
+        return None
+    if np.nanmax(np.abs(lat)) <= 90.0 and np.nanmax(np.abs(lon)) <= 360.0:
+        km_per_deg = 111.32
+        dy = dlat * km_per_deg
+        dx = dlon * km_per_deg * float(np.cos(np.deg2rad(np.nanmean(lat))))
+    else:  # projected coordinates in metres
+        dy, dx = dlat / 1000.0, dlon / 1000.0
+    return float(dx * dy)
+
+
+def effective_obs_sigma(sigma_o: float, corr_length_km: float | None, pixel_area_km2: float | None) -> float:
+    """Effective observation error std ``sigma_o * sqrt(max(L^2 / (dx dy), 1))``.
+
+    Neighbouring pixels of a satellite image share their error, so the observation error variance entering the
+    OI system is inflated by the number of pixels per independent error cell, ``mu2_eff = mu2 * L^2 / (dx dy)``
+    (Beckers et al., 2006). A ``corr_length_km`` of ``None`` or 0, or an unknown pixel size, returns ``sigma_o``.
+    """
+    if not corr_length_km or not pixel_area_km2 or pixel_area_km2 <= 0:
+        return float(sigma_o)
+    return float(sigma_o * np.sqrt(max(corr_length_km ** 2 / pixel_area_km2, 1.0)))
+
+
+def estimate_error_corr_length_km(
+    dineof_meta: dict,
+    X_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    pixel_area_km2: float | None,
+    apply_log: bool = True,
+    ndates: int = 30,
+    fallback_km: float = 50.0,
+    max_km: float = 200.0,
+    seed: int = 0,
+    rho_cut: float = 0.05,
+) -> dict:
+    """Correlation length (km) of the observation error, from the spatial autocorrelation of the EOF residual.
+
+    The residual is ``observation - EOF reconstruction`` (``U diag(s) V^T`` plus climatology, in the space where
+    DINEOF works, i.e. natural log if ``apply_log``) on up to ``ndates`` dates with enough observations. It is the
+    part of the signal that the retained modes do not explain, hence the error that the OI treats as observation
+    noise. The masked spatial autocovariance of each residual map is computed by FFT and averaged over the dates.
+    ``r_eff`` (pixels per independent error cell) is ``1 + sum(rho)`` over the lags up to the first radius where the
+    radial mean of ``rho`` drops below ``rho_cut``, and ``L = sqrt(r_eff * dx * dy)``.
+
+    Returns a dict ``L_km`` (bounded to [pixel size, ``max_km``]), ``r_eff``, ``cut_pixels`` and ``ok``. When the
+    estimate is impossible (unknown pixel size, too few dates, correlation still above ``rho_cut`` at the largest
+    usable lag), ``L_km`` is ``fallback_km`` and ``ok`` is False.
+    """
+    out = {"L_km": float(fallback_km), "r_eff": None, "cut_pixels": None, "ok": False}
+    try:
+        if not pixel_area_km2 or pixel_area_km2 <= 0:
+            return out
+        ny, nx = mask_2d.shape
+        wy, wx = np.where(mask_2d)
+        good = np.where(np.isfinite(X_obs).mean(axis=0) >= 0.05)[0]
+        if len(good) < 3:
+            return out
+        rng = np.random.default_rng(seed)
+        dates = np.sort(rng.choice(good, size=min(ndates, len(good)), replace=False))
+        U, s, v = dineof_meta['u'], dineof_meta['s'], dineof_meta['v']
+        clim = dineof_meta.get('clim', 0.0)
+        c = (clim[:, 0] if clim.ndim > 1 else clim) if isinstance(clim, np.ndarray) else float(clim)
+        py, px = 2 * ny, 2 * nx
+        num = np.zeros((py, px // 2 + 1), dtype=np.complex128)
+        cnt = np.zeros_like(num)
+        for d in dates:
+            obs = X_obs[:, d].astype(np.float64)
+            ok = np.isfinite(obs)
+            if apply_log:
+                obs = np.log(np.maximum(obs, 1e-7))
+            rec = U[ok] @ (s * v[d]) + (c[ok] if isinstance(c, np.ndarray) else c)
+            col = obs[ok] - rec
+            r = np.zeros((ny, nx))
+            m = np.zeros((ny, nx))
+            r[wy[ok], wx[ok]] = col - np.mean(col)
+            m[wy[ok], wx[ok]] = 1.0
+            fr = np.fft.rfft2(r, s=(py, px))
+            fm = np.fft.rfft2(m, s=(py, px))
+            num += fr * np.conj(fr)
+            cnt += fm * np.conj(fm)
+        ac = np.fft.fftshift(np.fft.irfft2(num, s=(py, px)))
+        nc_ = np.fft.fftshift(np.fft.irfft2(cnt, s=(py, px)))
+        cy, cx = py // 2, px // 2
+        rho = np.where(nc_ > 0.5, ac / np.maximum(nc_, 1.0), np.nan)
+        rho = rho / rho[cy, cx]
+        yy, xx = np.indices(rho.shape)
+        dist = np.hypot(yy - cy, xx - cx)
+        rmax = int(min(ny, nx) // 3)
+        radial = np.array([np.nanmean(rho[(dist >= k - 0.5) & (dist < k + 0.5)]) for k in range(1, rmax)])
+        below = np.where(radial <= rho_cut)[0]
+        if len(below) == 0:
+            return out
+        cut = int(below[0]) + 1
+        sel = (dist > 0) & (dist <= cut) & np.isfinite(rho)
+        r_eff = float(1.0 + np.sum(np.maximum(rho[sel], 0.0)))
+        L = float(np.sqrt(r_eff * pixel_area_km2))
+        if not np.isfinite(L) or L <= 0:
+            return out
+        return {"L_km": min(max(L, float(np.sqrt(pixel_area_km2))), float(max_km)), "r_eff": r_eff,
+                "cut_pixels": cut, "ok": True}
+    except Exception:
+        return out
+
+
+def resolve_corr_length_km(
+    corr_length_km: float | str | None,
+    dineof_meta: dict,
+    X_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    coords_meta: dict,
+    apply_log: bool = True,
+) -> tuple[float | None, dict | None]:
+    """Turn the user setting into a length in km: ``'auto'`` -> estimated (50 km fallback), a number -> itself, None or 0 -> None."""
+    if corr_length_km is None:
+        return None, None
+    if isinstance(corr_length_km, str):
+        if corr_length_km.lower() != 'auto':
+            raise ValueError("corr_length_km must be 'auto', a positive number of km, or None.")
+        area = estimate_pixel_area_km2(coords_meta['lat'], coords_meta['lon'])
+        est = estimate_error_corr_length_km(dineof_meta, X_obs, mask_2d, area, apply_log=apply_log)
+        return est['L_km'], est
+    return (float(corr_length_km) if float(corr_length_km) > 0 else None), None
+
+
 def stream_reconstruction_and_oi_netcdf(
     out_path: str,
     X_rec: np.ndarray,
@@ -681,7 +815,8 @@ def stream_reconstruction_and_oi_netcdf(
     q_rec: np.ndarray | None = None,
     q_obs: np.ndarray | None = None,
     X_raw_obs: np.ndarray | None = None,
-    vmax: float | None = None
+    vmax: float | None = None,
+    corr_length_km: float | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Write a reconstruction to NetCDF while computing OI diagnostics.
 
@@ -719,6 +854,11 @@ def stream_reconstruction_and_oi_netcdf(
         Raw observation matrix for validation or preservation.
     vmax : float or None
         Optional upper bound applied to reconstructed values before writing.
+    corr_length_km : float or None
+        Correlation length L (km) of the observation error (a number; ``'auto'`` is resolved by the caller, see
+        :func:`resolve_corr_length_km`). The observation error variance of the OI system is
+        ``sigma_o^2 * max(L^2 / (dx dy), 1)`` (Beckers et al., 2006); ``None`` keeps ``sigma_o^2``.
+        The written ``error`` derives from the absolute analysis variance ``P = diag(U A^-1 U^T)`` obtained with it.
 
     Returns
     -------
@@ -736,7 +876,8 @@ def stream_reconstruction_and_oi_netcdf(
 
     U_k = dineof_meta['u']
     s_k = dineof_meta['s']
-    sigma_o = dineof_meta['sigma_o']
+    sigma_o = effective_obs_sigma(
+        dineof_meta['sigma_o'], corr_length_km, estimate_pixel_area_km2(coords_meta['lat'], coords_meta['lon']))
     obs_mask = dineof_meta['obs_mask']
     keep_obs = dineof_meta.get('keep_observations', True)
 
@@ -815,10 +956,8 @@ def stream_reconstruction_and_oi_netcdf(
             buf_data[mask_2d] = rec_final_t
             var_data[t, :, :] = buf_data
 
-            sigma_o2 = float(sigma_o ** 2)
-
             if is_log_scale:
-                var_log_t = sigma_o2 * rel_err_t
+                var_log_t = err_var_t
                 valid_err = np.isfinite(var_log_t)
                 err_phys_t = np.full(n_water, np.nan, dtype=np.float32)
                 v_t = var_log_t[valid_err]
@@ -828,7 +967,7 @@ def stream_reconstruction_and_oi_netcdf(
                     * np.sqrt(np.expm1(v_t))
                 )
             else:
-                err_phys_t = np.sqrt(sigma_o2 * rel_err_t)
+                err_phys_t = np.sqrt(err_var_t)
 
             buf_err.fill(np.nan)
             buf_err[mask_2d] = err_phys_t
@@ -997,7 +1136,8 @@ def run_reconstruction_pipeline(
     local_refinement_sigma: float | None = None,
     use_disk: bool = False,
     solver: str = 'auto',
-    dineof_kwargs: dict | None = None
+    dineof_kwargs: dict | None = None,
+    corr_length_km: float | str | None = 'auto'
 ):
     """Run the complete NetCDF-to-diagnostics reconstruction workflow.
 
@@ -1041,6 +1181,11 @@ def run_reconstruction_pipeline(
         Store DINEOF work arrays in temporary memory-mapped files when possible.
     solver : str
         Spectral solver passed to :func:`dineof`.
+    corr_length_km : float, 'auto' or None
+        Correlation length L (km) of the observation error, used to inflate the observation error variance of the
+        OI system by ``max(L^2 / (dx dy), 1)`` (Beckers et al., 2006). ``'auto'`` (default) estimates L from the
+        spatial autocorrelation of the residual of the retained EOF modes (bounded to [pixel size, 200 km], 50 km
+        fallback if the estimate fails). A number fixes L; ``None`` or 0 disables the correction.
     dineof_kwargs : dict or None
         Additional keyword arguments forwarded to :func:`dineof`. Values in this
         dictionary take precedence over ``use_disk`` and ``solver``.
@@ -1144,6 +1289,14 @@ def run_reconstruction_pipeline(
     s_k = meta['s']
     sigma_o = meta['sigma_o']
     obs_mask = meta['obs_mask']
+
+    L_km, L_info = resolve_corr_length_km(corr_length_km, meta, X_input, mask_2d, coords_meta, apply_log=apply_log)
+    meta['oi_corr_length_km'] = L_km
+    meta['oi_corr_length_info'] = L_info
+    if L_km is not None:
+        tag = '' if L_info is None else (' (estimated)' if L_info['ok'] else ' (estimation failed, fallback)')
+        print(f"   [OI Error] Observation error correlation length L = {L_km:.1f} km{tag}")
+    sigma_o = effective_obs_sigma(sigma_o, L_km, estimate_pixel_area_km2(coords_meta['lat'], coords_meta['lon']))
 
     inv_lambda = 1.0 / np.maximum((s_k ** 2) / float(n_time), 1e-12)
     inv_sigma2 = 1.0 / max(sigma_o ** 2, 1e-12)
@@ -1269,7 +1422,8 @@ def run_reconstruction_pipeline(
         q_rec=q_rec,
         q_obs=q_obs,
         X_raw_obs=X_stream_obs,
-        vmax=vmax
+        vmax=vmax,
+        corr_length_km=L_km
     )
 
     export_diagnostics_and_plots(

@@ -125,6 +125,20 @@ During NetCDF export, local error variance and relative error ratio are evaluate
 
 $$[P_t]_{mm} = \sum_{i=1}^k \sum_{j=1}^k (U_k)_{mi} [A_t^{-1}]_{ij} (U_k)_{mj}, \qquad r_t(m) = \frac{[P_t]_{mm}}{[B]_{mm}} \in [0, 1]$$
 
+$P_t$ is an absolute variance (in $\ln$ units when `apply_log=True`): the exported `error` is derived from it directly, and `error_rel` is only the ratio $P_t/B$.
+
+**Spatially correlated observation error.** Neighbouring pixels of a satellite image share their error, so treating the pixels as independent makes the analysis error far too small. As in Beckers et al. (2006), the observation error variance entering $A_t$ is inflated by the number of pixels per independent error cell:
+
+$$\mu^2_{\text{eff}} = \sigma_o^2 \cdot \max\left(\frac{L^2}{\Delta x \, \Delta y}, 1\right)$$
+
+with the pixel area $\Delta x \, \Delta y$ deduced from the coordinates. The correlation length $L$ is set by `corr_length_km` in `run_reconstruction_pipeline`:
+
+* `'auto'` (default): $L$ is estimated from the spatial autocorrelation of the residual *observation - retained EOF modes* (reconstruction without restored observations), averaged over up to 30 dates. With $r_{\text{eff}} = 1 + \sum \rho$ over the lags up to the radius where the radial autocorrelation falls below 0.05, $L = \sqrt{r_{\text{eff}} \, \Delta x \, \Delta y}$, bounded to [pixel size, 200 km]. If the estimate fails (unknown pixel size, too few dates, autocorrelation still above 0.05 at the largest usable lag), $L = 50$ km is used and a message says so.
+* a number: $L$ in km, fixed by the user.
+* `None` or `0`: no correction, $\mu^2_{\text{eff}} = \sigma_o^2$ (the error is then much too optimistic on satellite data).
+
+> **Note**: the OI error is an *indicator* of where the reconstruction is more or less constrained by the data, not an exact error bar. On the benchmark cases (held-out test pixels) the 1σ coverage with `'auto'` is about 48-70 % (68 % expected for a Gaussian error) and the 2σ coverage about 76-92 % (95 % expected); the announced error is slightly optimistic and only moderately correlated with the actual error at pixel level.
+
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
 For log-transformed environmental variables:
 
@@ -464,6 +478,7 @@ Defined in `io_utils.py`, coordinates file-to-file batch reconstruction with str
 | `use_disk` | `bool` | `False` | Forwards out-of-core disk caching to `dineof`. |
 | `solver` | `str` | `'auto'` | Eigensolver forwarded to core engine (`'auto'`, `'dense'`, `'lanczos'`, `'randomized'`). |
 | `dineof_kwargs` | `dict` or `None` | `None` | Keyword arguments forwarded directly to `dineof(...)` (e.g. `{'debug': True, 'nev': 30, 'toliter': 1e-3, 'subsample_ratio': 0.1}`). |
+| `corr_length_km` | `float`, `'auto'` or `None` | `'auto'` | Correlation length $L$ of the observation error used by the OI error ([§3](#3-in-stream-optimal-interpolation-oi-analysis-error)). `'auto'` estimates it from the autocorrelation of the EOF residual (50 km fallback); a number fixes it; `None` or `0` disables the correction. |
 
 > **Note**: All parameters accepted by the core `dineof(...)` engine (such as `debug`, `nev`, `toliter`, `alpha`, `numit`, `cv_ratio`, `subsample_ratio`, and `cv_patience`) are passed dynamically through the `dineof_kwargs` dictionary.
 
