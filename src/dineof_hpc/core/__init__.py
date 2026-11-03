@@ -7,7 +7,7 @@
 from .main import (
     dineof,
     compute_dineof_oi_error_step,
-    select_cv_blocks_multi,
+    select_cv_points,
 )
 from .io_utils import (
     load_netcdf_masked,
@@ -20,7 +20,7 @@ from .io_utils import (
 __all__ = [
     "dineof",
     "compute_dineof_oi_error_step",
-    "select_cv_blocks_multi",
+    "select_cv_points",
     "load_netcdf_masked",
     "run_reconstruction_pipeline",
     "fit_quantile_transfer_training",

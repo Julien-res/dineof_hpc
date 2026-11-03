@@ -25,6 +25,7 @@ from __future__ import annotations
 import functools
 import os
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
@@ -731,105 +732,80 @@ def compute_dineof_oi_error_step(
 #                   CROSS-VALIDATION PATCH SELECTION
 # =============================================================================
 
-def select_cv_blocks_multi(
+def select_cv_points(
     X: NDArray[np.float32],
     n_cv_total: int,
-    n_patches: int = 3,
     mask_2d: NDArray[np.bool_] | None = None,
-    patch_size: int = 11,
-    seed: int | None = None
+    seed: int | None = None,
+    n_sets: int = 3,
 ) -> list[tuple[NDArray[np.intp], NDArray[np.intp]]]:
-    """Generate disjoint validation patches that mimic spatial cloud gaps.
+    """Draw isolated observed points (pixel, date) to withhold for cross-validation.
+
+    The points are drawn uniformly over the observed pixels and dates, without
+    replacement, as in DINEOF GHER. They are returned in ``n_sets`` disjoint
+    groups (the groups only fix the random stream; scoring pools all points).
 
     Parameters
     ----------
     X : NDArray[np.float32]
-        Data matrix of shape (M, N).
+        Data matrix of shape (M, N) with NaN where not observed.
     n_cv_total : int
-        Target total number of cross-validation points.
-    n_patches : int
-        Number of independent patch sets to extract.
+        Target total number of withheld points.
     mask_2d : NDArray[np.bool_] or None
-        2D boolean sea/water domain mask.
-    patch_size : int
-        Side length (in pixels) of the 2D square patches.
+        2D boolean sea/water domain mask; ``X`` rows are its water pixels.
     seed : int or None
-        Random seed for patch centroid selection.
+        Random seed.
+    n_sets : int
+        Number of disjoint groups the points are split into.
 
     Returns
     -------
     list[tuple[NDArray[np.intp], NDArray[np.intp]]]
-        List of ``(rows, cols)`` tuples. Each pair contains spatial and temporal
-        indices of valid observations withheld for cross-validation. Returned
-        patches are disjoint.
-
-    Notes
-    -----
-    With ``mask_2d`` set, ``rows`` index the flattened water pixels represented
-    by ``X`` and ``cols`` index time. Without a grid mask, spatial and temporal
-    coordinates are sampled independently.
+        List of ``(rows, cols)`` tuples (spatial and temporal indices of the
+        withheld observations); the groups are disjoint.
     """
     M, N = X.shape
     rng = np.random.default_rng(seed)
-    n_per_patch = max(1, n_cv_total // n_patches)
+    n_per_set = max(1, n_cv_total // n_sets)
+    n_water = int(mask_2d.sum()) if mask_2d is not None else None
 
-    water_y, water_x = (np.where(mask_2d) if mask_2d is not None else (None, None))
-    grid_lookup = None
-    if mask_2d is not None:
-        grid_lookup = np.full(mask_2d.shape, -1, dtype=np.int64)
-        grid_lookup[water_y, water_x] = np.arange(M)
-
-    half_w = patch_size // 2
     taken_mask = np.zeros((M, N), dtype=bool)
-    patches = []
+    groups = []
 
-    for _ in range(n_patches):
+    for _ in range(n_sets):
         rows_list, cols_list = [], []
         count = 0
         attempts = 0
 
-        while count < n_per_patch and attempts < n_per_patch * 20:
+        while count < n_per_set and attempts < n_per_set * 20:
             attempts += 1
             if mask_2d is not None:
-                c_idx = rng.integers(0, len(water_y))
-                cy, cx = water_y[c_idx], water_x[c_idx]
-                t = rng.integers(0, N)
-
-                y_min = max(0, cy - half_w)
-                y_max = min(mask_2d.shape[0], cy + half_w + 1)
-                x_min = max(0, cx - half_w)
-                x_max = min(mask_2d.shape[1], cx + half_w + 1)
-
-                sub = grid_lookup[y_min:y_max, x_min:x_max]
-                valid = sub[(sub != -1)]
-                if len(valid) == 0:
+                r = int(rng.integers(0, n_water))
+                t = int(rng.integers(0, N))
+                if r >= M or np.isnan(X[r, t]) or taken_mask[r, t]:
                     continue
-
-                obs_pts = valid[(~np.isnan(X[valid, t])) & (~taken_mask[valid, t])]
+                sel_r = np.array([r], dtype=np.intp)
+                sel_c = np.array([t], dtype=np.intp)
             else:
-                batch = (n_per_patch - count) * 2
+                batch = (n_per_set - count) * 2
                 r_pts = rng.integers(0, M, size=batch)
                 c_pts = rng.integers(0, N, size=batch)
-                valid_idx = (~np.isnan(X[r_pts, c_pts])) & (~taken_mask[r_pts, c_pts])
-                obs_pts = r_pts[valid_idx]
-                t = c_pts[valid_idx]
-
-            if len(obs_pts) == 0:
-                continue
-
-            take = min(len(obs_pts), n_per_patch - count)
-            sel_r = obs_pts[:take]
-            sel_c = np.full(take, t, dtype=np.intp) if mask_2d is not None else t[:take]
+                ok = (~np.isnan(X[r_pts, c_pts])) & (~taken_mask[r_pts, c_pts])
+                if not ok.any():
+                    continue
+                take = min(int(ok.sum()), n_per_set - count)
+                sel_r = r_pts[ok][:take]
+                sel_c = c_pts[ok][:take]
 
             taken_mask[sel_r, sel_c] = True
             rows_list.append(sel_r)
             cols_list.append(sel_c)
-            count += take
+            count += len(sel_r)
 
         if len(rows_list) > 0:
-            patches.append((np.concatenate(rows_list).astype(np.intp), np.concatenate(cols_list).astype(np.intp)))
+            groups.append((np.concatenate(rows_list).astype(np.intp), np.concatenate(cols_list).astype(np.intp)))
 
-    return patches
+    return groups
 
 
 # =============================================================================
@@ -912,10 +888,10 @@ def dineof(
     alpha: float = 0.01,
     numit: int = 3,
     cv_ratio: float = 0.02,
-    cv_patch_size: int = 11,
+    cv_patch_size: int | None = None,
     cv_max_points: int | None = 500_000,
     cv_patience: int = 3,
-    n_cv_runs: int = 3,
+    n_cv_runs: int | None = None,
     min_improvement: float = 0.0,
     subsample_ratio: float = 1.0,
     subsample_min: int = 5_000_000,
@@ -931,7 +907,7 @@ def dineof(
     Input values are centered internally, optionally transformed to logarithmic
     space, and reconstructed by progressively increasing the EOF rank. Original
     observations remain unchanged when ``keep_observations=True``. The optimal
-    rank is selected from the pooled RMSE on withheld spatial patches.
+    rank is selected from the pooled RMSE on withheld isolated points.
 
     Parameters
     ----------
@@ -973,14 +949,14 @@ def dineof(
         Number of temporal diffusion passes applied to the covariance matrix.
     cv_ratio : float
         Approximate fraction of valid observations withheld for cross-validation.
-    cv_patch_size : int
-        Side length (in pixels) of 2D validation cloud patches.
+    cv_patch_size : int or None
+        Deprecated and ignored: cross-validation uses isolated points (as DINEOF GHER); the 2D patch hold-out was removed.
     cv_max_points : int or None
         Upper bound on withheld points, limiting validation memory and runtime.
     cv_patience : int
         Number of consecutive modes with no new CV minimum before stopping.
-    n_cv_runs : int
-        Number of independent spatial patch sets used for validation.
+    n_cv_runs : int or None
+        Deprecated and ignored (the withheld points are pooled).
     min_improvement : float
         Minimum relative CV improvement required to test another mode. ``0``
         disables this plateau criterion.
@@ -989,7 +965,7 @@ def dineof(
     subsample_min : int
         Minimum spatial size before covariance subsampling is activated.
     seed : int or None
-        Random seed for reproducible cross-validation patch extraction.
+        Random seed for reproducible cross-validation point selection.
     verbose : bool
         Whether to display execution logs and iteration diagnostics.
     use_disk : bool
@@ -1161,10 +1137,10 @@ def dineof(
             water_coords = np.where(mask)
             active_mask_2d[water_coords[0][nan_rows], water_coords[1][nan_rows]] = False
 
-    patches = select_cv_blocks_multi(
-        X_active, n_cv, n_patches=n_cv_runs, mask_2d=active_mask_2d,
-        patch_size=cv_patch_size, seed=seed
-    )
+    if cv_patch_size is not None or n_cv_runs is not None:
+        warnings.warn("cv_patch_size and n_cv_runs are deprecated and ignored: cross-validation uses isolated points.",
+                      DeprecationWarning, stacklevel=3)
+    patches = select_cv_points(X_active, n_cv, mask_2d=active_mask_2d, seed=seed)
 
     mask_miss = np.isnan(X_active)
     Xo_cv_list = []
@@ -1219,7 +1195,7 @@ def dineof(
 
     if verbose:
         print(f"DINEOF initialized: {M} spatial points x {N} dates.")
-        print(f"Cross-validation: {len(patches)} patch sets ({total_cv_points} masked evaluation points).")
+        print(f"Cross-validation: {len(patches)} point groups ({total_cv_points} masked evaluation points).")
 
     # Start with one mode so later rank increments have a stable initialization.
     if verbose:
@@ -1230,7 +1206,7 @@ def dineof(
     _parallel_update_orchestrator(Xa, v, 1, mask_miss, buf_proj, buf_rec, shrink)
     if verbose:
         print(f"\nDINEOF engine ready: {M} spatial points x {N} dates.")
-        print(f"Cross-validation: {len(patches)} patch sets ({total_cv_points} masked evaluation points).")
+        print(f"Cross-validation: {len(patches)} point groups ({total_cv_points} masked evaluation points).")
         print("Starting iterative mode exploration:\n")
 
     t_profiling['init_pass'] = time.perf_counter() - t0_step
@@ -1265,8 +1241,7 @@ def dineof(
             if float(np.sqrt(diff_sq / n_total_miss) / stdvini) < toliter:
                 break
 
-            # Score all withheld patches together so each withheld pixel has equal
-            # weight regardless of the patch in which it was sampled.
+            # Score all withheld points together so each withheld point has equal weight.
         if debug:
             t0_op = time.perf_counter()
         sq_err_total = sum(

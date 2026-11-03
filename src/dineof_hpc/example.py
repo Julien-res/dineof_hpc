@@ -55,9 +55,7 @@ DINE_OPTS = {
         "toliter": 0.003,            # Relative convergence tolerance.
         "nitemax": 300,              # Maximum iterations allowed per EOF mode.
         "alpha": 0.005,              # Temporal diffusion strength.
-        "cv_patch_size": 11,         # Side length of validation patches in pixels.
         "cv_max_points": 500_000,    # Maximum number of validation points.
-        "n_cv_runs": 3,              # Number of independent validation patch sets.
         "cv_patience": 3,            # Modes allowed after the CV minimum.
         "keep_observations": True,   # Preserve genuine observations exactly.
         "subsample_ratio": 0.1,     # Use 10% of pixels for covariance estimation.
@@ -70,9 +68,7 @@ DINE_OPTS = {
         "toliter": 0.01,             # Stop earlier with a looser tolerance.
         "nitemax": 50,               # Use fewer iterations per EOF mode.
         "alpha": 0.005,              # Keep the temporal filter unchanged.
-        "cv_patch_size": 11,         # Keep the same spatial validation scale.
         "cv_max_points": 50_000,     # Evaluate fewer validation points.
-        "n_cv_runs": 1,              # Use one validation patch set.
         "cv_patience": 1,            # Stop soon after the CV minimum.
         "keep_observations": True,   # Preserve genuine observations exactly.
         "subsample_ratio": 0.1,     # Keep covariance computation compact.

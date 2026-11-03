@@ -15,7 +15,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 - [Performance Benchmarks](#performance-benchmarks-vs-canonical-fortran)
 - [Core Formulations](#core-formulations)
   - [1. Unconditionally Stable 1D Implicit Temporal Diffusion](#1-unconditionally-stable-1d-implicit-temporal-diffusion)
-  - [2. Spatial Patch Hold-out & Pooled RMSE](#2-spatial-patch-hold-out--pooled-rmse)
+  - [2. Isolated-Point Hold-out & Pooled RMSE](#2-isolated-point-hold-out--pooled-rmse)
   - [3. In-Stream Optimal Interpolation (OI) Analysis Error](#3-in-stream-optimal-interpolation-oi-analysis-error)
   - [4. Exact Analytical Physical Error for Log-Normal Distributions](#4-exact-analytical-physical-error-for-log-normal-distributions)
   - [5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate)
@@ -46,7 +46,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 | **Covariance Construction** | Direct matrix products. | Full matrix multiplication $A^{T} A$ (`np.dot`). | Matrix product $A^{T} A$ (`np.matmul`) with precomputed, frozen spatial subsampling indices. |
 | **Missing Data Indexing** | 1D index arrays of ocean points and gaps. | Global coordinate tuples via `np.isnan(X).nonzero()`. | Boolean masking combined with chunked BLAS projections (1 byte per spatiotemporal element). |
 | **Temporal Diffusion Filter** | Discrete Laplacian diffusion with uniform step increments (`dindiff.f`). | Discrete diffusion with time delta in seconds cast to `uint16`. | Unconditionally stable 1D implicit diffusion (Thomas algorithm) - see [§1](#1-unconditionally-stable-1d-implicit-temporal-diffusion). |
-| **Cross-Validation Sampling** | Cloud mask files or uniform random points. | Stochastic sampling of isolated pixels (`numpy.random.choice`). | Spatial patch hold-out ($L \times L$ blocks) - see [§2](#2-spatial-patch-hold-out--pooled-rmse). |
+| **Cross-Validation Sampling** | Cloud mask files or uniform random points. | Stochastic sampling of isolated pixels (`numpy.random.choice`). | Isolated-point hold-out, as in DINEOF GHER - see [§2](#2-isolated-point-hold-out--pooled-rmse). |
 | **CV Sample Sizing** | User-defined parameter. | Continuous formula: $\min(0.01 M N + 40, 0.03 M N)$. | Adaptive sizing with an upper ceiling (`cv_max_points`, default $5 \times 10^{5}$), preventing extraction bottlenecks on rasters with $M N \gt 10^{9}$. |
 | **Post-Validation Convergence** | Restores CV points and iterates until `toliter`. | Restores CV points and iterates until `toliter`. | Protocol maintained; out-of-sample predictions frozen at $k_{\text{opt}}$ before the final pass, preventing leakage. Optimal state cached on disk via `memmap`. |
 | **Uncertainty Estimation (OI)** | Companion routine (`dineof_error.f90`). | Not implemented. | Analytical reduced-subspace OI analysis error - see [§3](#3-in-stream-optimal-interpolation-oi-analysis-error). |
@@ -101,10 +101,10 @@ Using variable intervals $\Delta t_{i} = t_{i+1} - t_{i}$, cell widths use half-
 
 As in the reference DINEOF, the singular value of a mode is the square root of the eigenvalue of the *filtered* matrix, with $U = AV/\|AV\|$. Each mode is therefore scaled by $\sqrt{\lambda_{\text{filtered}}/(v^{T}Bv)}$ (equal to 1 when `alpha = 0`) in both the EM update and the final reconstruction. Without this factor the iteration does not converge for `alpha > 0` and the cross-validation curve rises after a few modes; with it the curve is flat after its minimum, as in the reference code.
 
-### 2. Spatial Patch Hold-out & Pooled RMSE
-Isolated-pixel cross-validation underestimates reconstruction error due to spatial autocorrelation. Validation points are extracted as 2D patches ($L \times L$ pixels) simulating realistic cloud cover. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE:
+### 2. Isolated-Point Hold-out & Pooled RMSE
+A reproducible random subset of the observed (pixel, date) pairs, `cv_ratio` of the valid observations (2 % by default, capped at 5 % of them and at `cv_max_points`), is withheld, as in DINEOF GHER. Optimal rank $k_{\text{opt}}$ minimizes the pooled RMSE:
 
-$$\text{RMSE}_{\text{CV}}(k) = \sqrt{\frac{1}{N_{\text{eval}}} \sum_{f=1}^K \sum_{i \in \text{patch}_f} \left(X_a(i) - X_o(i)\right)^2}$$
+$$\text{RMSE}_{\text{CV}}(k) = \sqrt{\frac{1}{N_{\text{eval}}} \sum_{i \in \text{withheld}} \left(X_a(i) - X_o(i)\right)^2}$$
 
 Out-of-sample predictions are frozen at $k_{\text{opt}}$ prior to the final convergence pass with restored observations, preventing validation data leakage.
 
@@ -177,7 +177,7 @@ $$\Delta_{\text{qmap},\ln}(m, t) = \mathcal{Q}_{\text{obs}}\left(\mathcal{F}_{\t
 
 **Operational Safeguards:**
 
-* **Data-leakage-free calibration**: Transfer functions $\mathcal{Q}$<sub>obs</sub> and $\mathcal{F}$<sub>rec</sub> are fitted strictly on valid training observations; withheld cross-validation patches are excluded.
+* **Data-leakage-free calibration**: Transfer functions $\mathcal{Q}$<sub>obs</sub> and $\mathcal{F}$<sub>rec</sub> are fitted strictly on valid training observations; withheld cross-validation points are excluded.
 * **KGE arbitration gate**: Out-of-sample predictions are checked against withheld observations via the Kling-Gupta Efficiency. If performance degrades:
 
 $$\text{KGE}_{\text{QMap}} \lt \text{KGE}_{\text{raw}}$$
@@ -212,7 +212,7 @@ Because canonical DINEOF reconstructs missing data using global low-rank spatial
    $$X_{\text{refined}}(x, y, t) = X_{\text{rec}}(x, y, t) \cdot \exp\left(\Delta_{\text{local},\ln}(x, y, t)\right)$$
 
 4. **Cross-Validation Arbitration Gate with Support Masking**:
-   When `local_refinement_sigma=None`, an adaptive grid search ($\sigma \in [1.5, 2.5, 3.5, 5.0, 7.0]$ pixels) is arbitrated against withheld validation patches without data leakage. To prevent artificial patch-size artifacts (where central pixels of large $L \times L$ hold-out blocks lack surrounding observations and dilute the score), skill is evaluated strictly on reachable evaluation points ($W(x, y, t) \ge \epsilon_{\text{cutoff}}$). The optimal bandwidth $\sigma^*$ is retained only if it improves reachable RMSE by at least 1.0% without degrading global out-of-sample RMSE; otherwise, the filter is safely neutralized.
+   When `local_refinement_sigma=None`, an adaptive grid search ($\sigma \in [1.5, 2.5, 3.5, 5.0, 7.0]$ pixels) is arbitrated against withheld validation points without data leakage. Skill is evaluated strictly on reachable evaluation points ($W(x, y, t) \ge \epsilon_{\text{cutoff}}$). The optimal bandwidth $\sigma^*$ is retained only if it improves reachable RMSE by at least 1.0% without degrading global out-of-sample RMSE; otherwise, the filter is safely neutralized.
 
 Genuine observations remain strictly untouched. Inside large cloud gaps where distance to measurements exceeds $3\sigma_{\text{spatial}}$, $W \to 0$, ensuring a smooth asymptotic fallback to the canonical global EOF reconstruction.
 
@@ -277,7 +277,7 @@ dineof_hpc/
                                      v
                         [ main.dineof (Core) ]
        +-------------------------------------------------------------+
-       | 1. Disjoint 2D patch selection (select_cv_blocks_multi)     |
+       | 1. Isolated hold-out point selection (select_cv_points)     |
        | 2. Automatic rank search (_estimate_nev)                    |
        | 3. Progressive SVD updates                                  |
        | 4. Out-of-sample RMSE convergence & early stopping          |
@@ -382,7 +382,6 @@ DINE_OPTS = {
     'alpha': 0.01,
     'numit': 3,
     'cv_ratio': 0.02,
-    'cv_patch_size': 11,
     'subsample_ratio': 0.1,  # Subsample covariance on massive grids
     'use_disk': False,        # Fast in-memory execution on high-RAM nodes
     'solver': 'dense',
@@ -442,15 +441,15 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `nitemax` | `int` | `300` | Maximum iterations permitted per mode. |
 | `alpha` | `float` | `0.01` | 1D implicit Laplacian temporal diffusion coefficient (units: days², `time_coords` in days). `0` disables the filter. When `alpha > 0` each mode is also scaled by $\sqrt{\lambda_{\text{filtered}} / v^{T}Bv}$, the reference DINEOF convention (see §1). On our benchmarks `0.01` helps strongly on daily series (Z1, Z2) and is neutral to slightly harmful on 5-day series (Z3); use `0` for very sparse dates. |
 | `numit` | `int` | `3` | Number of diffusion iterations applied to the covariance matrix. |
-| `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld for spatial patch cross-validation. |
-| `cv_patch_size` | `int` | `11` | Side length in pixels of 2D evaluation cloud patches. |
+| `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld, as isolated points, for cross-validation (capped at 5 %). |
+| `cv_patch_size` | `int` or `None` | `None` | Deprecated and ignored (the 2D patch hold-out was removed: on the benchmark cases isolated points select the same number of modes as DINEOF GHER and give the same test RMSE at the default `alpha`). |
 | `cv_max_points` | `int` or `None` | `500_000` | Maximum evaluation points ceiling to prevent memory bottlenecks. |
 | `cv_patience` | `int` | `3` | Number of explored modes without a new CV minimum before early stopping. |
-| `n_cv_runs` | `int` | `3` | Number of disjoint evaluation patch sets. |
+| `n_cv_runs` | `int` or `None` | `None` | Deprecated and ignored. |
 | `min_improvement`| `float` | `0.0` | Minimum relative CV gain required to justify higher mode increments. |
 | `subsample_ratio`| `float` | `1.0` | Spatial subsampling fraction for temporal covariance calculation (1.0 = exact). |
 | `subsample_min` | `int` | `5_000_000`| Spatial points threshold above which `subsample_ratio` is applied. |
-| `seed` | `int` or `None` | `42` | Random seed ensuring deterministic patch selection and subsampling. |
+| `seed` | `int` or `None` | `42` | Random seed ensuring deterministic hold-out selection and subsampling. |
 | `verbose` | `bool` | `True` | Prints iteration counts, explained variance, and pooled RMSE to console. |
 | `use_disk` | `bool` | `False` | Enables disk caching via `numpy.memmap`. Keep `False` on high-memory nodes (>= 256 GB RAM). |
 | `solver` | `str` | `'auto'` | Eigensolver selection (`'auto'`, `'dense'`, `'lanczos'`, `'randomized'`). |

@@ -330,7 +330,7 @@ def arbitrate_local_residual_refinement(
 
     Evaluates candidate spatial kernel bandwidths on withheld evaluation points
     that fall within the observational support of the Gaussian kernel (W >= cutoff),
-    preventing large-patch geometric artifacts from diluting local filter skill.
+    keeping unreachable points from diluting local filter skill.
 
     Parameters
     ----------
