@@ -607,6 +607,158 @@ def apply_local_residual_refinement_2d(
     return X_refined
 
 
+SPACETIME_SIGMAS = [1.5, 3.5, 7.0, 10.0, 15.0]
+SPACETIME_SIGMAS_T = [0.0, 1.0, 2.0]
+
+
+def _to_cube(X: np.ndarray, mask_2d: np.ndarray) -> np.ndarray:
+    """Scatter an ``(n_water, n_time)`` matrix into a ``(time, lat, lon)`` float32 cube (zeros on land)."""
+    cube = np.zeros((X.shape[1],) + mask_2d.shape, dtype=np.float32)
+    cube[:, mask_2d] = X.T
+    return cube
+
+
+def _spacetime_correction(R: np.ndarray, W: np.ndarray, sigma: float, sigma_t: float,
+                          decorrelation_cutoff: float) -> np.ndarray:
+    """Normalised 3D Gaussian (time, y, x) correction; zero where the kernel weight is below the cutoff."""
+    sig = (sigma_t, sigma, sigma)
+    num = gaussian_filter(R, sigma=sig, mode='constant', cval=0.0)
+    den = gaussian_filter(W, sigma=sig, mode='constant', cval=0.0)
+    corr = np.zeros_like(R)
+    ok = den > decorrelation_cutoff
+    corr[ok] = num[ok] / den[ok]
+    return corr
+
+
+def _spacetime_residual(X_rec: np.ndarray, X_raw_obs: np.ndarray, is_log_scale: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Residual (observation - reconstruction, in ln space if requested) and observation indicator, ``(n_water, n_time)``."""
+    obs = np.isfinite(X_raw_obs)
+    if is_log_scale:
+        res = np.log(np.maximum(np.where(obs, X_raw_obs, 1.0), 1e-7)) - np.log(np.maximum(X_rec, 1e-7))
+    else:
+        res = np.where(obs, X_raw_obs - X_rec, 0.0)
+    return np.where(obs, res, 0.0).astype(np.float32), obs
+
+
+def arbitrate_spacetime_refinement(
+    X_rec: np.ndarray,
+    X_raw_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    dineof_meta: dict,
+    candidate_sigmas: list[float] | None = None,
+    candidate_sigmas_t: list[float] | None = None,
+    decorrelation_cutoff: float = 0.05,
+    is_log_scale: bool = False
+) -> tuple[bool, float | None, float | None, np.ndarray]:
+    """Select the space-time Barnes kernel on the withheld cross-validation points.
+
+    The residual field (observation - reconstruction) is smoothed with a normalised 3D Gaussian
+    (``sigma_t`` dates along time, ``sigma`` pixels in space), built *without* the withheld points,
+    and the pair ``(sigma, sigma_t)`` giving the lowest RMSE on those points is kept. The refinement
+    is validated only if it lowers the CV RMSE of the unrefined reconstruction.
+
+    Parameters
+    ----------
+    X_rec, X_raw_obs, mask_2d, dineof_meta : see :func:`arbitrate_local_residual_refinement`.
+    candidate_sigmas : list of float or None
+        Spatial bandwidths in pixels (default ``[1.5, 3.5, 7, 10, 15]``).
+    candidate_sigmas_t : list of float or None
+        Temporal bandwidths in dates (default ``[0, 1, 2]``; 0 = purely spatial).
+    decorrelation_cutoff : float
+        Kernel weight below which the correction is ignored.
+    is_log_scale : bool
+        Residuals evaluated in natural-log space.
+
+    Returns
+    -------
+    validated, best_sigma, best_sigma_t, pred_cv_refined
+    """
+    cv_r, cv_c = dineof_meta.get('cv_rows'), dineof_meta.get('cv_cols')
+    truth_cv, pred_cv = dineof_meta.get('cv_truth'), dineof_meta.get('cv_pred')
+    if cv_r is None or len(cv_r) == 0 or truth_cv is None or pred_cv is None:
+        print("   [Refinement Gate] No cross-validation points available. Skipping refinement.")
+        return False, None, None, pred_cv
+    sigmas = SPACETIME_SIGMAS if candidate_sigmas is None else list(candidate_sigmas)
+    sigmas_t = SPACETIME_SIGMAS_T if candidate_sigmas_t is None else list(candidate_sigmas_t)
+
+    truth_cv = np.asarray(truth_cv, dtype=np.float64)
+    pred_cv = np.asarray(pred_cv, dtype=np.float64)
+    if is_log_scale:
+        valid = np.isfinite(truth_cv) & np.isfinite(pred_cv) & (truth_cv > 0) & (pred_cv > 0)
+        y_true, y_base = np.log(truth_cv[valid]), np.log(pred_cv[valid])
+    else:
+        valid = np.isfinite(truth_cv) & np.isfinite(pred_cv)
+        y_true, y_base = truth_cv[valid], pred_cv[valid]
+    if int(valid.sum()) < 30:
+        print("   [Refinement Gate] Insufficient valid CV points (< 30). Skipping refinement.")
+        return False, None, None, pred_cv
+
+    res, obs = _spacetime_residual(X_rec, X_raw_obs, is_log_scale)
+    obs_cv = obs.copy()
+    obs_cv[cv_r, cv_c] = False
+    R_cv = _to_cube(np.where(obs_cv, res, 0.0).astype(np.float32), mask_2d)
+    W_cv = _to_cube(obs_cv.astype(np.float32), mask_2d)
+    del res
+    wy, wx = np.where(mask_2d)
+    cvt, cvy, cvx = cv_c[valid], wy[cv_r[valid]], wx[cv_r[valid]]
+
+    rmse = lambda a, b: float(np.sqrt(np.mean((a - b) ** 2)))  # noqa: E731
+    base = rmse(y_base, y_true)
+    print(f"\n   [Refinement Gate] Evaluating space-time Barnes filter on {int(valid.sum())} CV points (baseline RMSE {base:.4f}).")
+    best = None
+    for st in sigmas_t:
+        for s in sigmas:
+            c = _spacetime_correction(R_cv, W_cv, s, st, decorrelation_cutoff)[cvt, cvy, cvx]
+            if is_log_scale:
+                c = np.clip(c, -3.0, 3.0)
+            r = rmse(y_base + c, y_true)
+            print(f"      sigma = {s:4.1f} px, sigma_t = {st:3.1f} dates | CV RMSE {base:.4f} -> {r:.4f}")
+            if best is None or r < best[0]:
+                best = (r, s, st, y_base + c)
+    r, s, st, y_best = best
+    if r < base:
+        print(f"   [Refinement Gate VALIDATED] Selected sigma = {s:.1f} px, sigma_t = {st:.1f} dates (CV RMSE {base:.4f} -> {r:.4f}).")
+        out = pred_cv.copy()
+        out[valid] = np.exp(y_best) if is_log_scale else y_best
+        return True, s, st, out
+    print("   [Refinement Gate REJECTED] No candidate lowered the cross-validation RMSE.")
+    return False, None, None, pred_cv
+
+
+def apply_spacetime_refinement(
+    X_rec: np.ndarray,
+    X_raw_obs: np.ndarray,
+    mask_2d: np.ndarray,
+    sigma_spatial_pixels: float,
+    sigma_time_dates: float,
+    decorrelation_cutoff: float = 0.05,
+    is_log_scale: bool = False
+) -> np.ndarray:
+    """Refine unobserved values with a space-time Barnes analysis of the observation residuals.
+
+    The residual of the genuine observations is smoothed with a normalised 3D Gaussian
+    (``sigma_time_dates`` along time, ``sigma_spatial_pixels`` in space) and added to the
+    reconstruction at unobserved points where the kernel weight exceeds ``decorrelation_cutoff``.
+    Observed values are left untouched. The whole ``(time, lat, lon)`` cube is held in memory
+    (a few float32 copies), so memory scales with the full grid size.
+
+    Returns an ``(n_water, n_time)`` array.
+    """
+    res, obs = _spacetime_residual(X_rec, X_raw_obs, is_log_scale)
+    R = _to_cube(res, mask_2d)
+    W = _to_cube(obs.astype(np.float32), mask_2d)
+    del res
+    corr = _spacetime_correction(R, W, sigma_spatial_pixels, sigma_time_dates, decorrelation_cutoff)[:, mask_2d].T
+    del R, W
+    X_refined = X_rec.copy()
+    un = ~obs
+    if is_log_scale:
+        X_refined[un] = X_rec[un] * np.exp(np.clip(corr[un], -3.0, 3.0))
+    else:
+        X_refined[un] += corr[un]
+    return X_refined
+
+
 def fit_quantile_transfer_training(
     X_obs_train: np.ndarray,
     X_rec_train: np.ndarray,
@@ -1134,6 +1286,8 @@ def run_reconstruction_pipeline(
     qmap_nb_quantiles: int = 100,
     apply_local_refinement: bool = False,
     local_refinement_sigma: float | None = None,
+    local_refinement_mode: str = 'spatial',
+    local_refinement_sigma_t: float | list | None = None,
     use_disk: bool = False,
     solver: str = 'auto',
     dineof_kwargs: dict | None = None,
@@ -1176,7 +1330,13 @@ def run_reconstruction_pipeline(
         Whether to refine unobserved pixels with local residual objective analysis.
     local_refinement_sigma : float or None, default=None
         Standard deviation in pixels of the Gaussian kernel for residual refinement.
-        If None, tests a candidate grid [1.5, 2.5, 3.5, 5.0, 7.0] and auto-selects.
+        If None, tests a candidate grid [1.5, 2.5, 3.5, 5.0, 7.0] and auto-selects
+        (``[1.5, 3.5, 7, 10, 15]`` in ``'spacetime'`` mode).
+    local_refinement_mode : {'spatial', 'spacetime'}, default='spatial'
+        ``'spatial'``: per-date 2D Barnes analysis. ``'spacetime'``: 3D Barnes analysis over
+        space and time; ``(sigma, sigma_t)`` is selected on the withheld CV points.
+    local_refinement_sigma_t : float, list of float or None, default=None
+        Temporal bandwidth(s) in dates for ``'spacetime'`` mode. If None, tests ``[0, 1, 2]``.
     use_disk : bool
         Store DINEOF work arrays in temporary memory-mapped files when possible.
     solver : str
@@ -1205,6 +1365,10 @@ def run_reconstruction_pipeline(
 
     do_refine = opts.pop('apply_local_refinement', apply_local_refinement)
     refine_sigma = opts.pop('local_refinement_sigma', local_refinement_sigma)
+    refine_mode = opts.pop('local_refinement_mode', local_refinement_mode)
+    refine_sigma_t = opts.pop('local_refinement_sigma_t', local_refinement_sigma_t)
+    if refine_mode not in ('spatial', 'spacetime'):
+        raise ValueError("local_refinement_mode must be 'spatial' or 'spacetime'")
 
     X_input, mask_2d, coords_meta = load_netcdf_masked(
         file_path=input_nc,
@@ -1252,28 +1416,46 @@ def run_reconstruction_pipeline(
 
     # --- Cross-Validation Arbitration & Local Spatial Refinement ---
     if do_refine:
-        sigmas_to_test = [refine_sigma] if (refine_sigma is not None) else [1.5, 2.5, 3.5, 5.0, 7.0]
-        validated, opt_sigma, pred_cv_refined = arbitrate_local_residual_refinement(
-            X_rec=X_final,
-            X_raw_obs=X_raw_observations,
-            mask_2d=mask_2d,
-            dineof_meta=meta,
-            candidate_sigmas=sigmas_to_test,
-            is_log_scale=apply_log
-        )
-
-        if validated and opt_sigma is not None:
-            pred_cv = pred_cv_refined
-            print(f"   [Post-Process] Applying local residual refinement with validated sigma={opt_sigma:.1f} px...")
-            X_final = apply_local_residual_refinement_2d(
+        if refine_mode == 'spacetime':
+            sig_list = None if refine_sigma is None else ([refine_sigma] if np.isscalar(refine_sigma) else list(refine_sigma))
+            sigt_list = None if refine_sigma_t is None else ([refine_sigma_t] if np.isscalar(refine_sigma_t) else list(refine_sigma_t))
+            validated, opt_sigma, opt_sigma_t, pred_cv_refined = arbitrate_spacetime_refinement(
+                X_rec=X_final, X_raw_obs=X_raw_observations, mask_2d=mask_2d, dineof_meta=meta,
+                candidate_sigmas=sig_list, candidate_sigmas_t=sigt_list, is_log_scale=apply_log
+            )
+            meta['refinement'] = {'mode': 'spacetime', 'validated': bool(validated), 'sigma': opt_sigma, 'sigma_t': opt_sigma_t}
+            if validated:
+                pred_cv = pred_cv_refined
+                print(f"   [Post-Process] Applying space-time refinement with sigma={opt_sigma:.1f} px, sigma_t={opt_sigma_t:.1f} dates...")
+                X_final = apply_spacetime_refinement(
+                    X_rec=X_final, X_raw_obs=X_raw_observations, mask_2d=mask_2d,
+                    sigma_spatial_pixels=opt_sigma, sigma_time_dates=opt_sigma_t, is_log_scale=apply_log
+                )
+            else:
+                print("   [Post-Process] Space-time refinement deactivated by CV arbitration gate.")
+        else:
+            sigmas_to_test = [refine_sigma] if (refine_sigma is not None) else [1.5, 2.5, 3.5, 5.0, 7.0]
+            validated, opt_sigma, pred_cv_refined = arbitrate_local_residual_refinement(
                 X_rec=X_final,
                 X_raw_obs=X_raw_observations,
                 mask_2d=mask_2d,
-                sigma_spatial_pixels=opt_sigma,
+                dineof_meta=meta,
+                candidate_sigmas=sigmas_to_test,
                 is_log_scale=apply_log
             )
-        else:
-            print("   [Post-Process] Local residual refinement deactivated by CV arbitration gate.")
+
+            if validated and opt_sigma is not None:
+                pred_cv = pred_cv_refined
+                print(f"   [Post-Process] Applying local residual refinement with validated sigma={opt_sigma:.1f} px...")
+                X_final = apply_local_residual_refinement_2d(
+                    X_rec=X_final,
+                    X_raw_obs=X_raw_observations,
+                    mask_2d=mask_2d,
+                    sigma_spatial_pixels=opt_sigma,
+                    is_log_scale=apply_log
+                )
+            else:
+                print("   [Post-Process] Local residual refinement deactivated by CV arbitration gate.")
 
     # Strictly enforce user observation preference on the final reconstructed matrix
     if user_keep_obs:

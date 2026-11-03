@@ -54,7 +54,7 @@ DINE_OPTS = {
         "nev": None,                 # Estimate the rank from the variance target.
         "toliter": 0.003,            # Relative convergence tolerance.
         "nitemax": 300,              # Maximum iterations allowed per EOF mode.
-        "alpha": 0.005,              # Temporal diffusion strength.
+        "alpha": 0.01,               # Temporal diffusion strength (default).
         "cv_max_points": 500_000,    # Maximum number of validation points.
         "cv_patience": 3,            # Modes allowed after the CV minimum.
         "keep_observations": True,   # Preserve genuine observations exactly.
@@ -67,7 +67,7 @@ DINE_OPTS = {
         "nev": 15,                   # Avoid automatic rank estimation.
         "toliter": 0.01,             # Stop earlier with a looser tolerance.
         "nitemax": 50,               # Use fewer iterations per EOF mode.
-        "alpha": 0.005,              # Keep the temporal filter unchanged.
+        "alpha": 0.01,               # Keep the temporal filter unchanged.
         "cv_max_points": 50_000,     # Evaluate fewer validation points.
         "cv_patience": 1,            # Stop soon after the CV minimum.
         "keep_observations": True,   # Preserve genuine observations exactly.
