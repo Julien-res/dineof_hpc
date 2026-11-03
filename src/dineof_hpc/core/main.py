@@ -904,6 +904,7 @@ def dineof(
     apply_log: bool = False,
     use_climatology: bool = False,
     keep_observations: bool = True,
+    exclude_cv_in_final: bool = True,
     threshold: float | None = None,
     nev: int | None = None,
     toliter: float = 1e-3,
@@ -953,6 +954,10 @@ def dineof(
         it back to the result. If false, remove and restore one global mean.
     keep_observations : bool
         If True, preserves original physical observations intact in the output.
+    exclude_cv_in_final : bool
+        If True (default), the cross-validation points stay out of the final convergence pass, as in DINEOF GHER: the model
+        that was validated is the one that is fitted, and the held-out points are put back in the output afterwards
+        (when ``keep_observations`` is true). If False, they are restored as data before the final pass.
     threshold : float or None
         Physical lower bound. Values less than or equal to it are treated as
         missing before the optional logarithmic transform.
@@ -1322,12 +1327,15 @@ def dineof(
     t0_step = time.perf_counter()
     n_opt = popt + 1
     Xa[mask_miss] = Xmiss_best
-    for (f_r, f_c), f_true in zip(patches, Xo_cv_list):
-        Xa[f_r, f_c] = f_true
-        mask_miss[f_r, f_c] = False
+    if not exclude_cv_in_final:
+        for (f_r, f_c), f_true in zip(patches, Xo_cv_list):
+            Xa[f_r, f_c] = f_true
+            mask_miss[f_r, f_c] = False
+    n_final_miss = int(mask_miss.sum())
 
     if verbose:
-        print(f"Final convergence pass with CV points restored ({n_opt} modes)...")
+        state = "left out" if exclude_cv_in_final else "restored"
+        print(f"Final convergence pass with CV points {state} ({n_opt} modes)...")
 
     final_iters = 0
     for nite in range(nitemax):
@@ -1335,7 +1343,7 @@ def dineof(
                     idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
         diff_sq = _parallel_update_orchestrator(Xa, v, n_opt, mask_miss, buf_proj, buf_rec, shrink)
         final_iters = nite + 1
-        if float(np.sqrt(diff_sq / n_miss) / stdvini) < toliter:
+        if float(np.sqrt(diff_sq / n_final_miss) / stdvini) < toliter:
             break
     t_profiling['final_pass'] = time.perf_counter() - t0_step
 
@@ -1344,6 +1352,10 @@ def dineof(
     u, s, v = _ssvd_spectral(Xa, n_opt, arr_time, alpha, numit, u, s, v, compute_u=True,
                          idx_sub=idx_sub_global, scale=subsample_scale, solver=active_solver, seed=seed, shrink=shrink)
 
+    if exclude_cv_in_final and keep_observations:
+        # the CV points were left out of the final fit: put the genuine observations back in the output
+        for (f_r, f_c), f_true in zip(patches, Xo_cv_list):
+            Xa[f_r, f_c] = f_true
     if not keep_observations:
         u_scaled = u[:, :n_opt] * s[:n_opt]
         v_T = np.ascontiguousarray(v[:, :n_opt].T)
@@ -1502,6 +1514,7 @@ def dineof(
         'apply_log': apply_log,
         'use_climatology': use_climatology,
         'keep_observations': keep_observations,
+        'exclude_cv_in_final': exclude_cv_in_final,
         'clim': clim_full,
         'disk_file': out_disk_path,
         'nev_used': nev,

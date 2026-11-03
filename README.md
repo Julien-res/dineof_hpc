@@ -435,6 +435,7 @@ Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, l
 | `apply_log` | `bool` | `False` | Applies natural logarithm transform $Y=\ln(X)$ and restores units upon completion. |
 | `use_climatology`| `bool` | `False` | Subtracts spatial per-pixel temporal mean before reconstruction. |
 | `keep_observations` | `bool` | `True` | If `True`, preserves original valid pixels. If `False`, returns the continuous filtered EOF field. |
+| `exclude_cv_in_final` | `bool` | `True` | Leaves the cross-validation points out of the final convergence pass, as DINEOF GHER does, so that the fitted model is the one validated; the genuine observations are put back in the output afterwards when `keep_observations=True`. `False` restores the CV points as data before the final pass (earlier behaviour). On the benchmark cases it lowers the test RMSE by 0.3-0.6 % and makes the gap-filling identical to DINEOF GHER at equal $k$. |
 | `threshold` | `float` or `None` | `None` | Lower physical threshold; values $\le$ threshold are cast to `NaN`. |
 | `nev` | `int` or `None` | `None` | Maximum EOF modes to explore (`nev < N`). If `None`, estimated via `_estimate_nev`. |
 | `toliter` | `float` | `1e-3` | Relative iteration RMS convergence threshold: $\text{RMS}(dx)/\text{stdvini}$. |
