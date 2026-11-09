@@ -24,13 +24,6 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
   - [Parameters of `dineof(...)`](#parameters-of-dineof)
   - [Parameters of `run_reconstruction_pipeline(...)`](#parameters-of-run_reconstruction_pipeline)
 - [Benchmarks](#benchmarks)
-  - [Protocol](#protocol)
-  - [Equivalence with DINEOF GHER](#equivalence-with-dineof-gher)
-  - [Speed](#speed)
-  - [Accuracy](#accuracy)
-  - [Scaling to Multi-Million-Pixel Grids](#scaling-to-multi-million-pixel-grids)
-  - [Benchmark Limits](#benchmark-limits)
-  - [Figures](#figures)
 - [Equivalence with DINEOF GHER and Differences](#equivalence-with-dineof-gher-and-differences)
 - [Core Formulations](#core-formulations)
   - [1. Unconditionally Stable 1D Implicit Temporal Diffusion](#1-unconditionally-stable-1d-implicit-temporal-diffusion)
@@ -66,7 +59,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 | **Post-Validation Convergence** | Restores CV points and iterates until `toliter`. | Restores CV points and iterates until `toliter`. | Protocol maintained; out-of-sample predictions frozen at $k_{\text{opt}}$ before the final pass, preventing leakage. Optimal state cached on disk via `memmap`. |
 | **Uncertainty Estimation (OI)** | Companion routine (`dineof_error.f90`). | Not implemented. | Analytical reduced-subspace OI analysis error - see [§3](#3-in-stream-optimal-interpolation-oi-analysis-error). |
 | **Log-Normal Error Derivation** | Not implemented. | Not implemented. | Exact analytical formulation - see [§4](#4-exact-analytical-physical-error-for-log-normal-distributions). |
-| **Distribution Mapping (Q-Map)** | Not implemented. | Not implemented. | Optional (off by default) in-stream Quantile Mapping with KGE arbitration gate; no measurable benefit in our benchmarks - see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate). |
+| **Distribution Mapping (Q-Map)** | Not implemented. | Not implemented. | Optional (off by default) in-stream Quantile Mapping with KGE arbitration gate; no benefit demonstrated in our tests - see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate). |
 | **Local Spatial Autocorrelation**| Not implemented (purely global EOF modes). | Not implemented (purely global EOF modes). | Normalized 2D Barnes objective analysis of spatial observation residuals with CV support gating - see [§6](#6-local-residual-objective-analysis-barnes-refinement). |
 | **Observation Preservation** | Binary substitution (`keep_obs=True` only). | Binary substitution (`keep_obs=True` only). | Dual-mode: strict gap-filling or seamless filtered EOF continuum - see [Implementation Details](#implementation-details). |
 
@@ -74,7 +67,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 
 ## Installation
 
-**Requirements**: Python 3.10 or newer; `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (all declared in `pyproject.toml`). `numba` JIT-compiles the update kernels on first use, so the first call of `dineof(...)` in a session is slower than the following ones. The benchmarks below were run with Python 3.11 on Linux (Ubuntu under WSL2).
+**Requirements**: Python 3.10 or newer; `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (all declared in `pyproject.toml`). `numba` JIT-compiles the update kernels on first use, so the first call of `dineof(...)` in a session is slower than the following ones.
 
 **With conda / mamba (recommended)** - `environment.yaml` installs the dependencies and the package in editable mode:
 
@@ -196,7 +189,7 @@ run_reconstruction_pipeline(
 )
 ```
 
-`output/` then contains `DINEOF_Reconstructed_chl.nc` (variables `data`, `error`, `error_rel`), `Error_Matrix_chl.csv`, `Error_Profile_chl.csv` and `Dashboard_chl.png` (see [Outputs](#outputs)). On this toy dataset the refinement gate reports a negligible gain (the synthetic field is almost exactly low-rank); on real cloud-contaminated imagery it is where the Barnes refinement brings its 3-5 % ([Benchmarks](#accuracy)).
+`output/` then contains `DINEOF_Reconstructed_chl.nc` (variables `data`, `error`, `error_rel`), `Error_Matrix_chl.csv`, `Error_Profile_chl.csv` and `Dashboard_chl.png` (see [Outputs](#outputs)). On this toy dataset the refinement gate reports a negligible gain (the synthetic field is almost exactly low-rank).
 
 For your own data, replace `var_name` and the paths, keep `apply_log=True` only for strictly positive, roughly log-normal variables, and see [Inputs](#inputs) for the file layout. `src/dineof_hpc/example.py` is a ready-to-edit script with a `conservative` and a `fast` profile.
 
@@ -218,15 +211,15 @@ NUMBA_NUM_THREADS=32 python -u src/dineof_hpc/example.py
 
 ### 4. Recommended Settings
 
-These recommendations come from the [benchmarks](#benchmarks) (three coastal zones, daily to 5-day series, 4 km to 60 m).
+These recommendations come from our tests on coastal series (daily to 5-day sampling, 4 km to 60 m); see [Benchmarks](#benchmarks).
 
 | Situation | Recommendation |
 | :--- | :--- |
-| Daily or near-daily series (MODIS, OLCI, VIIRS...) | Keep `alpha=0.01`: it lowers the test RMSE by 16 % (Z2) to 49 % (Z1) compared with `alpha=0`. |
-| Sparse revisit (5 days or more: Sentinel-2, Landsat) | `alpha=0.01` is neutral (+0.07 %, not significant); `alpha=0` is also fine. |
-| Rank search | Use `nev=30` for series of a few hundred dates or more (the benchmark setting); `nev=None` estimates a ceiling between 6 and 30. Always compare `meta['n_opt']` with `nev`: if they are equal the search was cut by the ceiling. |
-| Early stopping | `cv_patience=3` (default). A larger value explores a flat CV plateau further; on Z2, `cv_patience=3` saves about 30 % of the run time for a test RMSE within 1 % of the longer search. |
-| Gap structure | Add the space-time Barnes refinement (`apply_local_refinement=True, local_refinement_mode='spacetime'`): -3 % to -5 % test RMSE on the three zones, at the cost of a few seconds to about 100 s. It is off by default. |
+| Daily or near-daily series (MODIS, OLCI, VIIRS...) | Keep `alpha=0.01`: without the temporal filter the cross-validation overfits high-order modes. |
+| Sparse revisit (5 days or more: Sentinel-2, Landsat) | The temporal filter has little effect; `alpha=0.01` can be kept as a universal default. |
+| Rank search | Use `nev=30` for series of a few hundred dates or more; `nev=None` estimates a ceiling between 6 and 30. Always compare `meta['n_opt']` with `nev`: if they are equal the search was cut by the ceiling. |
+| Early stopping | `cv_patience=3` (default). A larger value explores a flat CV plateau further, at the cost of more modes. |
+| Gap structure | Consider the space-time Barnes refinement (`apply_local_refinement=True, local_refinement_mode='spacetime'`), which uses the residuals of nearby observations; it is off by default and adds computing time on large grids. |
 | Very large grids | Leave `n_threads=None`; set `subsample_ratio` (for instance `0.1`) only when the covariance product dominates the run time; `subsample_min` (default 5 000 000 elements) is the size below which it is ignored. |
 | Uncertainty | Use `error` / `error_rel` as a map of where the reconstruction is constrained by the data, not as a calibrated error bar (see [Known Limitations](#known-limitations)). |
 | Quantile mapping | `apply_qmap=False` (default): no measurable benefit in our tests. |
@@ -295,9 +288,9 @@ Defined in `core/main.py`. All defaults below are read from the function signatu
 | `apply_log` | `bool` | `False` | Reconstruct $\ln X$ and exponentiate afterwards. Use for strictly positive, log-normal tracers. |
 | `use_climatology` | `bool` | `False` | Remove the per-pixel temporal mean (instead of one global mean) before the decomposition. |
 | `keep_observations` | `bool` | `True` | `True`: original valid values are kept, only gaps are filled. `False`: returns the filtered low-rank field everywhere. |
-| `exclude_cv_in_final` | `bool` | `True` | Leaves the CV points out of the final convergence pass, as DINEOF GHER does, so the fitted model is the one that was validated; the genuine observations are put back in the output when `keep_observations=True`. `False` restores them as data before the final pass. On the benchmark cases `True` lowers the test RMSE by 0.3-0.6 %. |
+| `exclude_cv_in_final` | `bool` | `True` | Leaves the CV points out of the final convergence pass, as DINEOF GHER does, so the fitted model is the one that was validated; the genuine observations are put back in the output when `keep_observations=True`. `False` restores them as data before the final pass. |
 | `threshold` | `float` or `None` | `None` | Values $\le$ `threshold` become `NaN`. |
-| `nev` | `int` or `None` | `None` | Ceiling of the rank search (must be `< N`). `None`: estimated from the explained variance and clipped to 6-30. It bounds $k$: when `meta['n_opt'] == nev`, the CV optimum may be higher; increase `nev`. The benchmarks use `nev=30`. |
+| `nev` | `int` or `None` | `None` | Ceiling of the rank search (must be `< N`). `None`: estimated from the explained variance and clipped to 6-30. It bounds $k$: when `meta['n_opt'] == nev`, the CV optimum may be higher; increase `nev`. A value of 30 is a common choice. |
 | `toliter` | `float` | `1e-3` | Relative RMS convergence threshold of the iteration, $\text{RMS}(dx)/\text{stdvini}$. |
 | `nitemax` | `int` | `300` | Maximum iterations per mode. |
 | `alpha` | `float` | `0.01` | Strength of the temporal Laplacian filter (days$^2$). `0` disables it. For `alpha > 0` each mode is scaled by $\sqrt{\lambda_{\text{filtered}}/v^{T}Bv}$, the DINEOF GHER convention ([§1](#1-unconditionally-stable-1d-implicit-temporal-diffusion)). |
@@ -335,7 +328,7 @@ Defined in `core/io_utils.py`.
 | `apply_qmap` | `bool` | `False` | Quantile mapping (opt-in, no demonstrated benefit; [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate)). |
 | `qmap_nb_quantiles` | `int` | `100` | Number of points of the quantile transfer curve. |
 | `apply_local_refinement` | `bool` | `False` | Barnes refinement of the gaps ([§6](#6-local-residual-objective-analysis-barnes-refinement), [§7](#7-space-time-barnes-refinement)). Recommended for coastal imagery. |
-| `local_refinement_mode` | `str` | `'spatial'` | `'spatial'`: per-date 2D analysis. `'spacetime'`: 3D space-time analysis (the one evaluated in the benchmarks). |
+| `local_refinement_mode` | `str` | `'spatial'` | `'spatial'`: per-date 2D analysis. `'spacetime'`: 3D space-time analysis. |
 | `local_refinement_sigma` | `float`, list or `None` | `None` | Spatial bandwidth(s) in pixels. `None`: candidates arbitrated on the CV points ($[1.5, 2.5, 3.5, 5, 7]$ in `'spatial'` mode, $[1.5, 3.5, 7, 10, 15]$ in `'spacetime'` mode). |
 | `local_refinement_sigma_t` | `float`, list or `None` | `None` | Temporal bandwidth(s) in dates, `'spacetime'` only. `None`: $[0, 1, 2]$ arbitrated on the CV points. |
 | `use_disk` | `bool` | `False` | Forwarded to `dineof` (ignored if also set in `dineof_kwargs`). |
@@ -349,100 +342,7 @@ When the refinement is on, the core engine is run with `keep_observations=False`
 
 ## Benchmarks
 
-DINEOF-HPC was compared with the reference code **DINEOF GHER** (v2.0.0) on three contrasting coastal and estuarine satellite series. All figures below are taken from the article in preparation (Masson et al., *DINEOF-HPC v1.0*, submitted to Geoscientific Model Development); the benchmark scripts and data are not part of this repository. DINEOF-HPC is the code of this repository (commit `9452143`).
-
-### Protocol
-
-| Zone | Sensor and variable | Resolution | Sea pixels $M$ | Dates $N$ | $M \times N$ | Period | Missing (input / training) |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Z1** Gulf of Lion | MODIS-Aqua chlorophyll-*a*, daily | 4 km | 1,999 | 1,082 | $2.2 \times 10^{6}$ | 2022-2024 | 62.7 % / 64.6 % |
-| **Z2** Opal Coast | Sentinel-3 OLCI chlorophyll-*a*, daily | 300 m | 26,344 | 273 | $7.2 \times 10^{6}$ | 2022 | 46.5 % / 49.4 % |
-| **Z3** Gironde estuary | Sentinel-2 MSI suspended particulate matter, 5-day | 60 m | 287,352 | 139 | $4.0 \times 10^{7}$ | 2021-2023 | 38.5 % / 41.6 % |
-
-* **Test set.** For each zone and each of 3 random seeds, 5 % of the valid observations are withheld by transplanting the **real cloud masks of other dates** (donor scenes with 5-80 % cloud cover) onto the clearest scenes, keeping at least 20 % of observed sea pixels per scene. These gaps are realistic, multi-scale and independent of the isolated points used for the internal cross-validation. The study therefore has 9 cases (3 zones x 3 seeds).
-* **Preprocessing** is done once, outside both codes, so that both receive exactly the same input cube: natural logarithm, pixels with fewer than 3 training observations masked, per-pixel training mean subtracted.
-* **Metric.** Test RMSE in natural-log units, on the withheld points only (about 41,000 / 198,000 / 1,260,000 per seed on Z1 / Z2 / Z3). Values are means over the 3 seeds. Differences were tested with paired scene-level tests (cluster block bootstrap and Wilcoxon signed-rank test, one transplanted cloud event = one independent unit).
-* **Machine.** Intel Core i9-13900 (8 performance + 16 efficiency cores, 32 threads), 64 GB RAM, Ubuntu under WSL2. DINEOF GHER: `gfortran -O3`, double precision, OpenBLAS with 8 threads (its best setting on this machine). DINEOF-HPC: Python 3.11, Numba, automatic thread selection, `float32`. Common settings: `toliter=1e-3`, `nev=30`, `alpha=0.01` unless stated, 2 % isolated cross-validation points. Times are wall-clock seconds.
-
-### Equivalence with DINEOF GHER
-
-When both codes receive the same cross-validation points and the same rank $k$ (here $\alpha = 0$, seed 1; $k = 30$, 13 and 5 on Z1, Z2, Z3), the test RMSEs agree within 0.13 %:
-
-| Zone ($k$) | DINEOF-HPC | DINEOF GHER | Difference | 95 % interval | Wilcoxon $p$ |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| Z1 ($k = 30$) | 0.5613 | 0.5614 | -0.02 % | [-0.10, +0.08] % | 0.52 |
-| Z2 ($k = 13$) | 0.3375 | 0.3372 | +0.10 % | [-0.06, +0.24] % | 0.52 |
-| Z3 ($k = 5$) | 0.5335 | 0.5341 | -0.13 % | [-0.29, +0.00] % | 0.24 |
-
-With the temporal filter on ($\alpha = 0.01$, $k = 13$ on Z2, seed 1) the difference is 0.06 % (0.29011 vs. 0.29028). On Z2 the first three EOFs match to within 0.05-0.35 % in singular value, with spatial and temporal mode cosines above 0.99995. These agreements require `exclude_cv_in_final=True` and the mode scaling for `alpha > 0` (default behaviour).
-
-At default settings each code selects its own rank by cross-validation; the remaining differences (-0.7 % to +0.8 % in test RMSE) come from the rank chosen, and none is significant overall (see below).
-
-### Speed
-
-Mean wall-clock time over the 3 seeds (HPC with automatic threads).
-
-| Zone | DINEOF GHER, $\alpha = 0.01$ | DINEOF-HPC, $\alpha = 0.01$ | Speed-up | DINEOF GHER, $\alpha = 0$ | DINEOF-HPC, $\alpha = 0$ | Speed-up |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Z1 Gulf of Lion | 644 s | 147 s | x4 | 1,026 s | 44 s | x24 |
-| Z2 Opal Coast | 2,000 s (33 min) | 52 s | x39 | 1,979 s | 36 s | x56 |
-| Z3 Gironde (60 m) | 3,951 s (66 min) | 64 s | x62 | 5,000 s | 70 s | x71 |
-
-* The gain grows with the number of pixels. On the long daily Z1 series the default search runs up to the `nev = 30` ceiling, which limits the gain.
-* At equal rank ($k = 30$, 13, 5), DINEOF-HPC takes 48 s, 55 s and 145 s against 1,208 s, 2,008 s and 5,057 s for DINEOF GHER (x25, x37, x35): this is the per-iteration gain; the rest comes from earlier stopping on flat CV plateaus.
-
-### Accuracy
-
-Mean test RMSE (natural-log units), mean $\pm$ s.d. over the 3 seeds; $k$ is the selected rank for seeds 1/2/3. "Barnes ST" is DINEOF-HPC followed by the space-time Barnes refinement (`local_refinement_mode='spacetime'`, [§7](#7-space-time-barnes-refinement)).
-
-**Default temporal filter, $\alpha = 0.01$** (relative differences with respect to DINEOF GHER):
-
-| Zone | DINEOF GHER ($k$) | DINEOF-HPC ($k$) | DINEOF-HPC + Barnes ST | Time with Barnes ST |
-| :--- | :---: | :---: | :---: | :---: |
-| Z1 | 0.2548 $\pm$ 0.007 (30/30/30) | 0.2530 $\pm$ 0.004 (30/30/30), **-0.7 %** | 0.2456 $\pm$ 0.003, **-3.6 %** | 150 s |
-| Z2 | 0.2636 $\pm$ 0.004 (28/28/30) | 0.2656 $\pm$ 0.004 (19/25/26), **+0.8 %** | 0.2556 $\pm$ 0.003, **-3.0 %** | 65 s |
-| Z3 | 0.5434 $\pm$ 0.057 (5/6/5) | 0.5451 $\pm$ 0.059 (5/6/5), **+0.3 %** | 0.5192 $\pm$ 0.063, **-4.5 %** | 162 s |
-
-**No temporal filter, $\alpha = 0$:**
-
-| Zone | DINEOF GHER ($k$) | DINEOF-HPC ($k$) | DINEOF-HPC + Barnes ST |
-| :--- | :---: | :---: | :---: |
-| Z1 | 0.4923 $\pm$ 0.064 (30/30/30) | 0.4926 $\pm$ 0.063 (30/30/30) | 0.4880 $\pm$ 0.064 |
-| Z2 | 0.3228 $\pm$ 0.016 (13/12/12) | 0.3134 $\pm$ 0.026 (13/14/12) | 0.3014 $\pm$ 0.027 |
-| Z3 | 0.5455 $\pm$ 0.053 (5/6/6) | 0.5451 $\pm$ 0.053 (5/6/6) | 0.5198 $\pm$ 0.055 |
-
-What these results show:
-
-* **Equivalent accuracy at default settings.** DINEOF-HPC vs. DINEOF GHER: -0.71 % (Z1), +0.73 % (Z2), +0.33 % (Z3). The 95 % bootstrap intervals include zero on Z2 and Z3; on Z1 the Wilcoxon test gives $p = 0.12$ (the bootstrap interval just excludes zero, $p = 0.045$) and on Z2 $p = 0.037$, so differences of this size are at the limit of detectability. The two seed-level differences with $p < 0.05$ are Z1 seed 2 (-2.3 %, in favour of DINEOF-HPC) and Z2 seed 2 (+1.4 %, in favour of DINEOF GHER, caused by the earlier stop of the rank search on a flat plateau: $k = 25$ vs. $28$).
-* **Space-time Barnes refinement.** It lowers the test RMSE of the default DINEOF-HPC run by 2.9 % (Z1), 3.8 % (Z2) and 4.7 % (Z3), i.e. **-3 % to -5 %**, highly significant on every zone and every seed ($p < 10^{-8}$ pooled; $p \le 0.008$ on each of the 9 seeds). Against DINEOF GHER the gain is -3.6 %, -3.0 % and -4.5 % on the mean RMSE (paired tests: $p < 10^{-3}$ on every zone). Overhead: +3 s on Z1, +3 to +20 s on Z2, +90 to +105 s on Z3. On unfiltered Z1 the gain is only -0.9 %.
-* **Temporal filter.** `alpha = 0.01` lowers the test RMSE by 48.9 % on the daily Z1 series and 15.6 % on the daily Z2 series (both highly significant), and is neutral on the 5-day Z3 series (+0.07 %, $p = 0.67$). Without the filter the isolated-point cross-validation selects $k = 30$ on Z1 where the test optimum is $k = 5$ (0.360 vs. 0.493).
-* **Rank search.** On Z1 both codes reach the `nev = 30` ceiling; `nev = 50` gives only -1.2 % (0.2500) for a x1.45 run time (213 s vs. 147 s). On Z2 the CV curve is flat between $k = 19$ and $30$ (< 1 %). On Z3 the CV minimum is at $k = 5$-6 whereas the test optimum is at $k \approx 17$-18 (0.517): the Barnes refinement at $k = 5$-6 (0.5192) recovers this gain without computing 18 modes.
-
-### Scaling to Multi-Million-Pixel Grids
-
-The Gironde series was also prepared at 40 m and 20 m (seed 1, `alpha = 0.01`):
-
-| Resolution | Sea pixels | DINEOF-HPC | DINEOF GHER | Speed-up |
-| :--- | :---: | :---: | :---: | :---: |
-| 60 m | 287,352 | 46 s | 3,574 s | x78 |
-| 40 m | 646,660 | 89 s | 7,901 s | x89 |
-| 20 m | 2,580,746 | 308 s (5.1 min) | 34,340 s (9.5 h) | x112 |
-
-At 20 m ($M \times N = 3.6 \times 10^{8}$), DINEOF-HPC needs 25 % less peak memory (13.5 GB vs. 17.9 GB) and reaches a test RMSE of 0.547 vs. 0.551. At $\alpha = 0$ the DINEOF GHER run takes 11.4 h.
-
-### Benchmark Limits
-
-* Three zones (two chlorophyll-*a* products, one turbidity product), three cloud-transplant seeds each; no sea-surface temperature, multivariate or non-French-coastal case was tested, and the 40 m and 20 m runs rely on a single seed.
-* Times come from one workstation (i9-13900, WSL2); the speed-up depends on the number of cores and on the BLAS library used by DINEOF GHER.
-* The `nev = 30` ceiling is reached on Z1 (see above).
-* Isolated-point cross-validation, kept identical to DINEOF GHER, does not target extrapolation inside large cloud gaps; it can select a rank that is too high (unfiltered Z1) or too low (Z3). The Barnes refinement compensates on Z3 but does not remove the cause.
-* Reconstructions retain only 43-66 % of the observed spatial variance inside gaps that are at least 85 % withheld (variance loss typical of truncated EOF projections); the gain of the Barnes refinement is largest where gaps are small or short-lived.
-* The OI error is an indicator: with `corr_length_km='auto'`, the 1$\sigma$ coverage on held-out test pixels is 66 % (Z1), 60 % (Z2) and 50 % (Z3) against 68.3 % for a Gaussian, and the 2$\sigma$ coverage 89 %, 87 % and 78 % against 95.4 %; the scaled error has a standard deviation of 1.4 to 2.1. Estimated correlation lengths: 12 km (Z1), 4-5 km (Z2), 3 km (Z3).
-* The Sentinel-2 SPM of Z3 comes from Sen2Cor level-2A reflectance: it is a benchmark tracer, not a validated product. The study evaluates gap filling, not the accuracy of the underlying retrieval.
-
-### Figures
-
-The article's figures (study zones, spatial equivalence maps, speed, accuracy, power spectra, RMSE as a function of $k$ and $\alpha$, and the supplementary figures) will be added to this section once the final versions are validated; none is embedded yet. The only figure currently in `Optional/` illustrates the effect of `keep_observations`, see [Implementation Details](#implementation-details).
+DINEOF-HPC has been compared with the reference code DINEOF GHER on satellite chlorophyll-*a* and turbidity series at resolutions from 4 km to 60 m. The benchmark results (equivalence with DINEOF GHER, run times, accuracy on independent cloud masks, effect of the space-time Barnes refinement) will be added to this section after publication of the article (Masson et al., *DINEOF-HPC v1.0*, submitted to Geoscientific Model Development).
 
 ---
 
@@ -510,7 +410,7 @@ with the pixel area $\Delta x \, \Delta y$ deduced from the coordinates. The cor
 * a number: $L$ in km, fixed by the user.
 * `None` or `0`: no correction, $\mu^2_{\text{eff}} = \sigma_o^2$ (the error is then much too optimistic on satellite data).
 
-> **Note**: the OI error is an *indicator* of where the reconstruction is more or less constrained by the data, not an exact error bar. On the benchmark cases (held-out test pixels) the 1σ coverage with `'auto'` is about 48-70 % (68 % expected for a Gaussian error) and the 2σ coverage about 76-92 % (95 % expected); the announced error is slightly optimistic and only moderately correlated with the actual error at pixel level.
+> **Note**: the OI error is an *indicator* of where the reconstruction is more or less constrained by the data, not an exact error bar. On held-out test pixels the announced error is optimistic (observed coverage below the Gaussian expectation) and only moderately correlated with the actual error at pixel level.
 
 ### 4. Exact Analytical Physical Error for Log-Normal Distributions
 For log-transformed environmental variables:
@@ -528,7 +428,7 @@ $$\sigma_{\ln}^{2}(m, t) = \sigma_{o}^{2} \cdot r_{t}(m) = \sigma_{o}^{2} \cdot 
 ### 5. Tracer-Agnostic Quantile Mapping with KGE Arbitration Gate
 Variance attenuation in unconstrained cloudy areas can be corrected via Quantile Mapping modulated by the local relative error ratio $r_t(m) \in [0, 1]$.
 
-> **Status: optional, disabled by default (`apply_qmap=False`).** Independent-test benchmarks over 12 cases (several zones, resolutions and seeds) show that Q-Map has no measurable effect on the test RMSE (< 0.2 %), and the KGE gate accepts or rejects it essentially at random. Even with a calibrated error weighting the effect remains null, and without the $r_t$ weighting it degrades the reconstruction by 2 to 8 %. Its usefulness is therefore not demonstrated: enable it explicitly and validate it on your own data before relying on it.
+> **Status: optional, disabled by default (`apply_qmap=False`).** Independent tests on several zones, resolutions and seeds showed no measurable effect of Q-Map on the test RMSE, and the KGE gate accepted or rejected it essentially at random; without the $r_t$ weighting it degraded the reconstruction. Its usefulness is therefore not demonstrated: enable it explicitly and validate it on your own data before relying on it.
 
 The formulation below applies when it is enabled:
 
@@ -598,7 +498,7 @@ with $R = X_{\text{obs}} - X_{\text{rec}}$ (in $\ln$ space when `apply_log=True`
 
 * **Selection**: all pairs of $\sigma \in [1.5, 3.5, 7, 10, 15]$ pixels and $\sigma_t \in [0, 1, 2]$ dates are scored on the withheld cross-validation points (the residual field is built *without* them); the pair with the lowest CV RMSE is kept. The refinement is applied only if it lowers the CV RMSE of the unrefined reconstruction; otherwise it is switched off. $\sigma_t = 0$ is a purely spatial analysis.
 * **Use**: `run_reconstruction_pipeline(..., apply_local_refinement=True, local_refinement_mode='spacetime')`, optionally fixing `local_refinement_sigma` and/or `local_refinement_sigma_t` (a float, or a list of candidates). The selected values and the gate decision are printed in the console log. Genuine observations are never modified by the refinement itself.
-* **Cost and memory**: the whole `(time, lat, lon)` cube is filtered, so memory grows with the full grid size (a few float32 copies) and the candidate search costs 15 pairs of 3D Gaussian filters. On the benchmark zones it added from a few seconds (Gulf of Lion, Opal Coast) to about 100 s (Gironde, 60 m) to a default run, and reduced the test RMSE of the default run by 3 to 5 %.
+* **Cost and memory**: the whole `(time, lat, lon)` cube is filtered, so memory grows with the full grid size (a few float32 copies) and the candidate search costs 15 pairs of 3D Gaussian filters.
 * **Limits**: the gain is largest where gaps are small or short-lived; inside wide, long-lasting gaps the kernel weight falls under the cutoff and the correction vanishes, leaving the plain EOF reconstruction. The correlation scales are global (one pair per run).
 * **Functions**: `arbitrate_spacetime_refinement` (selection) and `apply_spacetime_refinement` (application) in `dineof_hpc.core.io_utils`.
 
@@ -618,7 +518,6 @@ with $R = X_{\text{obs}} - X_{\text{rec}}$ (in $\ln$ space when `apply_log=True`
 * **Progressive mode initialization.** To prevent unconverged higher modes from injecting high-frequency noise into gaps, iterations start strictly at $k=1$; each successive mode is initialized from the converged state of the preceding rank.
 * **Observation preservation vs. spatial continuum.** `keep_observations=True` retains observed pixels unchanged (strict gap-filling; may show a gradient seam at cloud edges due to raw sensor noise vs. low-rank smoothing). `keep_observations=False` returns the full continuous projection $\sum_{k=1}^{k_{\text{opt}}} u_{k} s_{k} v_{k}^{T}$, filtering noise everywhere for seamless gradients - useful for hydrodynamic front detection.
 
-  ![Raw_VS_KeepOBS_VS_DumpOBS](Optional/benchmark_reconstruction_3y.gif)
 
 * **Automatic rank search.** When `nev=None`, the search ceiling is estimated from the trace of the initial zero-filled covariance $B_0$:
 
@@ -705,14 +604,14 @@ dineof_hpc/
 
 ## Known Limitations
 
-* **`nev` bounds the rank.** The search never goes beyond `nev` (30 in the benchmarks). With `alpha > 0` on long daily series the CV optimum can lie at or beyond it (Z1: `nev = 50` gives only -1.2 % for x1.45 run time). Check `meta['n_opt']` against `nev`.
-* **Choice of the number of modes.** Isolated-point cross-validation does not target extrapolation inside large gaps: it can select a rank that is too high (unfiltered Z1: $k = 30$, test optimum $k = 5$) or too low (Z3: $k = 5$-6, test optimum $k \approx 17$-18). When the CV curve is flat (Z2) the selected $k$ depends on the hold-out sample, the seed and `cv_patience`. The space-time Barnes refinement compensates for part of this on Z3.
-* **Variance loss in large gaps.** Reconstructions retain 43-66 % of the observed spatial variance inside gaps at least 85 % unobserved; the gap RMSE of the isolated CV points is optimistic with respect to wide contiguous cloud gaps.
-* **OI error is an indicator**, not an exact error bar: with `corr_length_km='auto'`, 1$\sigma$ coverage on held-out test pixels is 50-66 % (68.3 % expected) and 2$\sigma$ coverage 78-89 % (95.4 % expected); the scaled error has a standard deviation of 1.4-2.1. Without the correlation-length correction (`corr_length_km=None`) the error is far too small on satellite data (1$\sigma$ coverage of a few percent at 300 m).
-* **Single `alpha`.** `alpha` is a user-chosen constant, not cross-validated; the best value depends on the temporal sampling (useful on daily series, neutral on 5-day series).
-* **Threads.** The automatic thread count was calibrated on one machine (Intel Core i9-13900); on other architectures `n_threads` or `NUMBA_NUM_THREADS` may be worth tuning.
+* **`nev` bounds the rank.** The search never goes beyond `nev`. With `alpha > 0` on long daily series the CV optimum can lie at or beyond it. Check `meta['n_opt']` against `nev`.
+* **Choice of the number of modes.** Isolated-point cross-validation does not target extrapolation inside large gaps: it can select a rank that is too high or too low for wide contiguous gaps. When the CV curve is flat the selected $k$ depends on the hold-out sample, the seed and `cv_patience`. The space-time Barnes refinement can compensate for part of this.
+* **Variance loss in large gaps.** Truncated EOF reconstructions retain less variance than the data inside large gaps; the CV RMSE of isolated points is optimistic with respect to wide contiguous cloud gaps.
+* **OI error is an indicator**, not an exact error bar: on held-out test pixels the announced error is optimistic, even with `corr_length_km='auto'`. Without the correlation-length correction (`corr_length_km=None`) it is far too small on satellite data.
+* **Single `alpha`.** `alpha` is a user-chosen constant, not cross-validated; the best value depends on the temporal sampling.
+* **Threads.** The automatic thread count was calibrated on one machine; on other architectures `n_threads` or `NUMBA_NUM_THREADS` may be worth tuning.
 * **Memory.** The working matrix is `float32` of size $M \times N$ (plus a few copies); the Barnes space-time refinement filters the whole `(time, lat, lon)` cube and needs a few more `float32` copies of the grid.
-* **Scope of the validation.** Three zones and variables (two chlorophyll-*a* products, one turbidity product); no sea-surface temperature or multivariate case was tested.
+* **Scope of the validation.** The method was tested on chlorophyll-*a* and turbidity series; no sea-surface temperature or multivariate case was tested.
 * Optional Quantile Mapping showed no measurable benefit and is off by default.
 
 ---
