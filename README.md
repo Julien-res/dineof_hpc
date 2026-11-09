@@ -1,6 +1,6 @@
 # DINEOF-HPC
 
-![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue) ![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
+![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue) ![Python Version](https://img.shields.io/badge/python-3.9%E2%80%933.14-blue)
 
 DINEOF-HPC is a high-performance Python implementation of the Data Interpolating Empirical Orthogonal Functions (DINEOF) algorithm, optimized for massive geophysical and satellite datasets on High-Performance Computing (HPC) architectures.
 
@@ -67,7 +67,7 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 
 ## Installation
 
-**Requirements**: Python 3.10 or newer; `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (all declared in `pyproject.toml`). `numba` JIT-compiles the update kernels on first use, so the first call of `dineof(...)` in a session is slower than the following ones.
+**Requirements**: Python 3.9 to 3.14 (unit tests run on each of these versions; the code uses no OS-specific feature and was tested on Windows and Linux); `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (all declared in `pyproject.toml`). `numba` JIT-compiles the update kernels on first use, so the first call of `dineof(...)` in a session is slower than the following ones.
 
 **With conda / mamba (recommended)** - `environment.yaml` installs the dependencies and the package in editable mode:
 
@@ -543,7 +543,6 @@ dineof_hpc/
 ├── environment.yaml          # Conda environment (dependencies + editable install)
 ├── README.md                 # Documentation
 ├── LICENSE                   # GPL-3.0
-├── Optional/                 # Illustrations
 ├── tests/                    # pytest suite (21 tests)
 └── src/
     └── dineof_hpc/

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dineof_hpc"
-version = "0.1.0"
+version = "1.0.0"
 description = "High-performance DINEOF implementation for large oceanographic datasets"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = {text = "GPL-3.0"}
 authors = [
     {name = "Julien Masson"}

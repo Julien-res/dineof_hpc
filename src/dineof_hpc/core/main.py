@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import os
+import tempfile
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -1166,7 +1167,7 @@ def dineof(
     buf_rec = np.empty((chunk_size, N), dtype=np.float32)
     shrink = np.ones((nev,), dtype=np.float32)
 
-    scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER', '/tmp')
+    scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER') or tempfile.gettempdir()
 
     if use_disk:
         xa_path = os.path.join(scratch_dir, f"Xa_{os.getpid()}_{int(time.time()*1000)}.dat")

@@ -1,0 +1,55 @@
+{
+  "title": "DINEOF-HPC: a high-performance Python/Numba implementation of DINEOF with space-time Barnes residual refinement (source code)",
+  "upload_type": "software",
+  "description": "<p>Source code of DINEOF-HPC (<code>dineof_hpc</code>), a Python/Numba implementation of Data Interpolating Empirical Orthogonal Functions (DINEOF) for large satellite ocean-colour datasets, with cross-validation on isolated points, optimal-interpolation error estimates and space-time Barnes residual refinement. Archived release described in the Geoscientific Model Development paper (see related identifiers). Derived from pyDINEOF (Coqu&eacute;, RBINS) and compared with the Fortran DINEOF of the GHER group.</p>",
+  "version": "1.0.0",
+  "license": "GPL-3.0",
+  "creators": [
+    {
+      "name": "Masson, Julien",
+      "affiliation": "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
+    },
+    {
+      "name": "Coqué, Arthur",
+      "affiliation": "Royal Belgian Institute of Natural Sciences (RBINS), Brussels, Belgium"
+    },
+    {
+      "name": "Verpoorter, Charles",
+      "affiliation": "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
+    },
+    {
+      "name": "Jamet, Cédric",
+      "affiliation": "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
+    }
+  ],
+  "keywords": [
+    "DINEOF",
+    "EOF",
+    "gap filling",
+    "ocean colour",
+    "satellite",
+    "Sentinel-2",
+    "Sentinel-3 OLCI",
+    "MODIS",
+    "Numba",
+    "Python"
+  ],
+  "language": "eng",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/Julien-res/dineof_hpc",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://github.com/REMSEM/pyDINEOF",
+      "relation": "isDerivedFrom",
+      "scheme": "url"
+    },
+    {
+      "identifier": "10.5281/zenodo.15187824",
+      "relation": "references",
+      "scheme": "doi"
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 
 __title__ = "dineof_hpc"
 __description__ = "High-performance DINEOF implementation for large oceanographic datasets"
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __author__ = "Julien Masson, Arthur Coque"
 __author_email__ = "julien.masson@univ-littoral.fr"
 __license__ = "GPL-3.0"

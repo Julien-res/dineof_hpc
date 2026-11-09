@@ -15,6 +15,7 @@ by ``NaN``.
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 import numpy as np
 import xarray as xr
@@ -273,7 +274,7 @@ def load_netcdf_masked(
     }
 
     # 4. Allocate shared temporary memory map
-    scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER', '/dev/shm' if os.path.exists('/dev/shm') else '/tmp')
+    scratch_dir = os.environ.get('JOBLIB_TEMP_FOLDER') or ('/dev/shm' if os.path.isdir('/dev/shm') else tempfile.gettempdir())
     mmap_path = os.path.join(scratch_dir, f"load_X_{os.getpid()}_{int(time.time() * 1000)}.dat")
     X_mmap = np.memmap(mmap_path, dtype=np.float32, mode='w+', shape=(n_water, n_time))
 
