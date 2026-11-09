@@ -11,8 +11,26 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 ---
 
 ## Table of Contents
-- [Feature Matrix](#feature-matrix-upstream-pydineof-vs-canonical-fortran)
-- [Benchmark Summary](#benchmark-summary-vs-canonical-fortran)
+- [Feature Matrix](#feature-matrix-upstream-pydineof-vs-dineof-gher)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+  - [1. Minimal In-Memory Example (NumPy Array)](#1-minimal-in-memory-example-numpy-array)
+  - [2. NetCDF Pipeline](#2-netcdf-pipeline)
+  - [3. Batch Execution on a Cluster](#3-batch-execution-on-a-cluster)
+  - [4. Recommended Settings](#4-recommended-settings)
+- [Variables and Data Conventions](#variables-and-data-conventions)
+  - [Inputs](#inputs)
+  - [Outputs](#outputs)
+  - [Parameters of `dineof(...)`](#parameters-of-dineof)
+  - [Parameters of `run_reconstruction_pipeline(...)`](#parameters-of-run_reconstruction_pipeline)
+- [Benchmarks](#benchmarks)
+  - [Protocol](#protocol)
+  - [Equivalence with DINEOF GHER](#equivalence-with-dineof-gher)
+  - [Speed](#speed)
+  - [Accuracy](#accuracy)
+  - [Scaling to Multi-Million-Pixel Grids](#scaling-to-multi-million-pixel-grids)
+  - [Benchmark Limits](#benchmark-limits)
+  - [Figures](#figures)
 - [Equivalence with DINEOF GHER and Differences](#equivalence-with-dineof-gher-and-differences)
 - [Core Formulations](#core-formulations)
   - [1. Unconditionally Stable 1D Implicit Temporal Diffusion](#1-unconditionally-stable-1d-implicit-temporal-diffusion)
@@ -26,27 +44,19 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 - [Software Architecture & Dataflow](#software-architecture--dataflow)
   - [Directory Structure](#directory-structure)
   - [Computational Dataflow](#computational-dataflow)
-- [Installation](#installation)
-- [Usage Examples](#usage-examples)
-  - [1. Minimal In-Memory Example (NumPy Array)](#1-minimal-in-memory-example-numpy-array)
-  - [2. HPC Batch Execution (NetCDF Pipeline)](#2-hpc-batch-execution-netcdf-pipeline)
-- [Input Parameters Reference](#input-parameters-reference)
-  - [1. Core Engine: `dineof(...)`](#1-core-engine-dineof)
-  - [2. High-Level Pipeline: `run_reconstruction_pipeline(...)`](#2-high-level-pipeline-run_reconstruction_pipeline)
-- [Output Deliverables & Diagnostics](#output-deliverables--diagnostics)
 - [Known Limitations](#known-limitations)
 - [Tests](#tests)
 - [Methodological References](#methodological-references)
-- [Citation](#citation)
 - [License](#license)
+- [Citation](#citation)
 
 ---
 
-## Feature Matrix: Upstream `pyDINEOF` vs. Canonical Fortran
+## Feature Matrix: Upstream `pyDINEOF` vs. DINEOF GHER
 
-| Component | Fortran DINEOF (GHER Reference) | Upstream `pyDINEOF` | DINEOF-HPC (This Implementation) |
+| Component | DINEOF GHER (reference) | Upstream `pyDINEOF` | DINEOF-HPC (This Implementation) |
 | :--- | :--- | :--- | :--- |
-| **Spectral Solver** | Iterative restarted Lanczos via ARPACK (`dsaupd`/`dseupd`). | Iterative restarted Lanczos via `scipy.sparse.linalg.eigsh`. | Dense Hermitian eigensolver (`scipy.linalg.eigh`) with dynamic crossover to Lanczos / Randomized SVD - see [Performance Benchmarks](#performance-benchmarks-vs-canonical-fortran). |
+| **Spectral Solver** | Iterative restarted Lanczos via ARPACK (`dsaupd`/`dseupd`). | Iterative restarted Lanczos via `scipy.sparse.linalg.eigsh`. | Dense Hermitian eigensolver (`scipy.linalg.eigh`) with dynamic crossover to Lanczos / Randomized SVD - see [Implementation Details](#implementation-details) and [Benchmarks](#benchmarks). |
 | **Memory & Iterative Update** | BLAS matrix-vector operations on 1D ocean coordinate vectors. | Explicit spatial mode computation $U = A V \Sigma^{-1}$, followed by dense $U \Sigma V^{T}$ allocation. | Sequential in-place spatial chunking with multi-threaded Numba JIT kernels - see [Implementation Details](#implementation-details). |
 | **Covariance Construction** | Direct matrix products. | Full matrix multiplication $A^{T} A$ (`np.dot`). | Matrix product $A^{T} A$ (`np.matmul`) with precomputed, frozen spatial subsampling indices. |
 | **Missing Data Indexing** | 1D index arrays of ocean points and gaps. | Global coordinate tuples via `np.isnan(X).nonzero()`. | Boolean masking combined with chunked BLAS projections (1 byte per spatiotemporal element). |
@@ -62,37 +72,377 @@ Applying canonical DINEOF to high-resolution missions (Sentinel-2, Landsat,...) 
 
 ---
 
-## Benchmark Summary vs. Canonical Fortran
+## Installation
 
-Canonical Fortran DINEOF (GHER reference) remains the standard for coarse-to-moderate oceanographic grids, but standard `INTEGER*4` indexing caps arrays at $2^{31} - 1 \approx 2.14 \times 10^{9}$ elements and its dense full-grid covariance product scales poorly with the number of dates.
+**Requirements**: Python 3.10 or newer; `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (all declared in `pyproject.toml`). `numba` JIT-compiles the update kernels on first use, so the first call of `dineof(...)` in a session is slower than the following ones. The benchmarks below were run with Python 3.11 on Linux (Ubuntu under WSL2).
 
-DINEOF-HPC was compared with the Fortran code on three satellite chlorophyll/turbidity series (daily 4 km MODIS over the Gulf of Lion, 1082 dates; daily 300 m OLCI over the Opal Coast, 273 dates; 5-day 60 m Sentinel-2 over the Gironde estuary, 139 dates), each with three random cloud-mask transplants (seeds) scored on held-out, truly missing points. Timings were measured on a single workstation (Intel Core i9-13900, Windows 11 with WSL2); both codes ran on the same machine with the same stopping rule (`toliter = 1e-3`, `nev = 30`). All figures below are means over the three seeds.
+**With conda / mamba (recommended)** - `environment.yaml` installs the dependencies and the package in editable mode:
 
-| Zone | GHER, `alpha = 0.01` (time / test RMSE) | DINEOF-HPC, defaults (time / test RMSE) | Speed-up | GHER, `alpha = 0` | DINEOF-HPC, `alpha = 0` |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| Z1 Gulf of Lion (MODIS 4 km, daily, 1082 dates) | 644 s / 0.2548 | 147 s / 0.2530 | x4 | 1026 s / 0.4923 | 44 s / 0.4926 |
-| Z2 Opal Coast (OLCI 300 m, daily, 273 dates) | 2000 s / 0.2636 | 52 s / 0.2656 | x39 | 1979 s / 0.3228 | 36 s / 0.3134 |
-| Z3 Gironde (Sentinel-2 60 m, 5-day, 139 dates) | 3951 s / 0.5434 | 64 s / 0.5451 | x62 | 5000 s / 0.5455 | 70 s / 0.5451 |
+```bash
+git clone https://github.com/Julien-res/dineof_hpc.git
+cd dineof_hpc
+conda env create -f environment.yaml
+conda activate dineof_hpc
+```
 
-Times are wall-clock seconds (HPC with automatic threads), test RMSE is in natural-log units of the variable on points that were really missing; means over three seeds.
+**With pip only** (inside a virtual environment or an existing conda environment):
 
-Details (per-seed values, figures, protocol) will be given in the article in preparation. Take-aways:
+```bash
+git clone https://github.com/Julien-res/dineof_hpc.git
+cd dineof_hpc
+pip install -e .
+```
 
-* **Speed**: x4 to x62 at the default settings (x24 to x71 at `alpha = 0`), the gain growing with the number of pixels. On the long daily MODIS series the default search runs up to the `nev = 30` ceiling, which limits the gain.
-* **Quality at equal settings**: with the same cross-validation points and the same number of modes ($\alpha = 0$, $k$ imposed), DINEOF-HPC and DINEOF GHER give the same test RMSE (differences of at most 0.2 %). At default settings the remaining differences (-0.7 % to +0.8 % with `alpha = 0.01`) come from the number of modes $k$ selected by cross-validation.
-* **Space-time Barnes refinement** ([§7](#7-space-time-barnes-refinement)) lowers the test RMSE of the default run by a further 3 to 5 % on the three zones.
-* **Temporal filter**: `alpha = 0.01` helps strongly on the daily series and is neutral on the 5-day series.
+**Check the installation**:
 
-**Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^{T} A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^{3})$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^{2})$, with convergence governed by the relative eigengap under the Kaniel-Paige-Saad theorem. `'auto'` applies the empirical crossover:
+```bash
+python -c "import dineof_hpc; from dineof_hpc.core.main import dineof; print(dineof_hpc.__version__)"
+pip install pytest
+pytest tests/
+```
 
-$$N^*(k) \approx \max(70, 10k)$$
+The test suite (21 tests) should pass in a few seconds. A `RuntimeWarning` about `numpy.ndarray size changed` raised while importing a compiled dependency is harmless.
 
-Dense LAPACK below this threshold (avoiding Krylov restart overhead), Lanczos/Randomized SVD above it (substantial gains for $N \gt 500$).
+**Threads.** `dineof(...)` sizes its own thread pool (see `n_threads` in the [parameter table](#parameters-of-dineof)); you do not need to set `OMP_NUM_THREADS` or `OPENBLAS_NUM_THREADS` for it (BLAS is kept single-threaded during the call). Two optional environment variables are read:
 
-**Key drivers of the speedup:**
-1. **Precomputed covariance subsampling** - spatial subsampling indices are frozen once at startup rather than redrawn every iteration, cutting covariance FLOPs and memory traffic by up to an order of magnitude without compromising leading-EOF accuracy.
-2. **Stationary background precomputation for OI** - the background covariance diagonal is computed once outside the temporal loop, avoiding redundant spatial-mode projections across tens of millions of pixels.
-3. **Multi-socket NUMA interleaving** - on dual-socket nodes, running with `numactl --interleave=all` distributes data pages across all memory channels and avoids bus saturation during BLAS operations.
+* `NUMBA_NUM_THREADS`: forces the number of compute threads (it also caps the pool).
+* `DINEOF_ELEMS_PER_THREAD`: matrix elements per thread for the automatic rule (default `500000`).
+
+---
+
+## Quick Start
+
+### 1. Minimal In-Memory Example (NumPy Array)
+
+Calls the numerical core directly on a NumPy array that contains `NaN` values. The array has shape `(M, N)`: `M` spatial points (rows) by `N` dates (columns). This example was run as written and takes a few seconds.
+
+```python
+import numpy as np
+from dineof_hpc.core.main import dineof
+
+# 1. Synthetic dimensions: M points, N dates
+M, N = 50_000, 120
+time_coords = np.arange(N, dtype=np.float32)      # dates in days
+
+# 2. Rank-3 synthetic field plus additive noise
+rng = np.random.default_rng(42)
+true_space = rng.standard_normal((M, 3), dtype=np.float32)
+true_time = rng.standard_normal((3, N), dtype=np.float32)
+X_truth = true_space @ true_time + 0.05 * rng.standard_normal((M, N), dtype=np.float32)
+
+# 3. Remove 40 % of the values
+cloud_mask = rng.uniform(0.0, 1.0, size=(M, N)) < 0.40
+X_synthetic = X_truth.copy()
+X_synthetic[cloud_mask] = np.nan
+
+# 4. Reconstruct
+X_rec, meta = dineof(
+    data=X_synthetic,
+    time_coords=time_coords,
+    nev=10,
+    toliter=1e-3,
+    alpha=0.01,
+    numit=3,
+    subsample_ratio=0.2,
+    verbose=False,
+)
+
+print(f"Optimal EOF rank retained : {meta['n_opt']}")
+print(f"Out-of-sample CV RMSE     : {meta['valcopt']:.5f}")
+print(f"Explained variance ratio  : {meta['var_ratio']:.2%}")
+print(f"True RMSE on the gaps     : {np.sqrt(np.mean((X_rec[cloud_mask] - X_truth[cloud_mask]) ** 2)):.5f}")
+```
+
+Expected output (`seed=42`): 3 modes retained, a CV RMSE of about 0.194 and a true RMSE on the gaps of about 0.193, close to the CV estimate; the exact digits can differ slightly between platforms. `X_rec` has the shape of the input and contains no `NaN`. A 3D cube `(time, lat, lon)` is also accepted when a 2D boolean `mask` of shape `(lat, lon)` is given.
+
+### 2. NetCDF Pipeline
+
+`run_reconstruction_pipeline` reads a NetCDF cube and a water mask, reconstructs, and writes the reconstruction, its OI error and diagnostics. The script below builds a small synthetic dataset (so that it can be run anywhere) and then calls the pipeline with the space-time Barnes refinement. It was run as written (a few seconds).
+
+```python
+import numpy as np
+import xarray as xr
+from dineof_hpc.core.io_utils import run_reconstruction_pipeline
+
+# --- Synthetic input: 120 daily scenes on a 40 x 50 grid, 40 % missing ---
+rng = np.random.default_rng(0)
+T, Y, X = 120, 40, 50
+lat = np.linspace(50.0, 51.0, Y)
+lon = np.linspace(1.0, 2.5, X)
+time = np.datetime64("2022-01-01") + np.arange(T).astype("timedelta64[D]")
+yy, xx = np.meshgrid(np.linspace(0, 1, Y), np.linspace(0, 1, X), indexing="ij")
+field = np.exp(1.0 + np.stack([np.sin(2 * np.pi * t / 30 + 3 * xx) * yy + 0.3 * np.cos(t / 7.0) * xx
+                               for t in range(T)]) + 0.05 * rng.standard_normal((T, Y, X)))
+field = field.astype("float32")
+field[rng.uniform(size=field.shape) < 0.4] = np.nan          # missing = NaN
+mask = np.ones((Y, X), dtype="int8")                         # 1 = water, 0 = excluded
+mask[:5, :5] = 0
+
+xr.Dataset({"chl": (("time", "lat", "lon"), field, {"units": "mg m-3"})},
+           coords={"time": time, "lat": lat, "lon": lon}).to_netcdf("input.nc")
+xr.Dataset({"mask": (("lat", "lon"), mask)}, coords={"lat": lat, "lon": lon}).to_netcdf("mask.nc")
+
+# --- Reconstruction ---
+run_reconstruction_pipeline(
+    input_nc="input.nc",
+    mask_file="mask.nc",
+    var_name="chl",
+    out_dir="output/",
+    apply_log=True,                         # log-normal tracer (chlorophyll, SPM...)
+    use_climatology=True,
+    apply_local_refinement=True,            # Barnes refinement, selected by cross-validation
+    local_refinement_mode="spacetime",
+    dineof_kwargs={"nev": 20, "verbose": False},
+)
+```
+
+`output/` then contains `DINEOF_Reconstructed_chl.nc` (variables `data`, `error`, `error_rel`), `Error_Matrix_chl.csv`, `Error_Profile_chl.csv` and `Dashboard_chl.png` (see [Outputs](#outputs)). On this toy dataset the refinement gate reports a negligible gain (the synthetic field is almost exactly low-rank); on real cloud-contaminated imagery it is where the Barnes refinement brings its 3-5 % ([Benchmarks](#accuracy)).
+
+For your own data, replace `var_name` and the paths, keep `apply_log=True` only for strictly positive, roughly log-normal variables, and see [Inputs](#inputs) for the file layout. `src/dineof_hpc/example.py` is a ready-to-edit script with a `conservative` and a `fast` profile.
+
+### 3. Batch Execution on a Cluster
+
+Edit the paths in `src/dineof_hpc/example.py`, then submit it with your scheduler (OAR, Slurm...). The package sizes its thread pool from the problem and the CPUs it is allowed to use, so a plain call is enough:
+
+```bash
+python -u src/dineof_hpc/example.py
+```
+
+To impose a thread count (for instance to match the cores granted by the scheduler):
+
+```bash
+NUMBA_NUM_THREADS=32 python -u src/dineof_hpc/example.py
+```
+
+`JOBLIB_TEMP_FOLDER` can point to a fast scratch directory used by the parallel NetCDF reader. On nodes with a lot of memory keep `use_disk=False` (the default); `use_disk=True` stores the working matrix in a `numpy.memmap` and is only meant for matrices larger than the RAM.
+
+### 4. Recommended Settings
+
+These recommendations come from the [benchmarks](#benchmarks) (three coastal zones, daily to 5-day series, 4 km to 60 m).
+
+| Situation | Recommendation |
+| :--- | :--- |
+| Daily or near-daily series (MODIS, OLCI, VIIRS...) | Keep `alpha=0.01`: it lowers the test RMSE by 16 % (Z2) to 49 % (Z1) compared with `alpha=0`. |
+| Sparse revisit (5 days or more: Sentinel-2, Landsat) | `alpha=0.01` is neutral (+0.07 %, not significant); `alpha=0` is also fine. |
+| Rank search | Use `nev=30` for series of a few hundred dates or more (the benchmark setting); `nev=None` estimates a ceiling between 6 and 30. Always compare `meta['n_opt']` with `nev`: if they are equal the search was cut by the ceiling. |
+| Early stopping | `cv_patience=3` (default). A larger value explores a flat CV plateau further; on Z2, `cv_patience=3` saves about 30 % of the run time for a test RMSE within 1 % of the longer search. |
+| Gap structure | Add the space-time Barnes refinement (`apply_local_refinement=True, local_refinement_mode='spacetime'`): -3 % to -5 % test RMSE on the three zones, at the cost of a few seconds to about 100 s. It is off by default. |
+| Very large grids | Leave `n_threads=None`; set `subsample_ratio` (for instance `0.1`) only when the covariance product dominates the run time; `subsample_min` (default 5 000 000 elements) is the size below which it is ignored. |
+| Uncertainty | Use `error` / `error_rel` as a map of where the reconstruction is constrained by the data, not as a calibrated error bar (see [Known Limitations](#known-limitations)). |
+| Quantile mapping | `apply_qmap=False` (default): no measurable benefit in our tests. |
+
+---
+
+## Variables and Data Conventions
+
+### Inputs
+
+**Core engine `dineof(...)`**
+
+| Object | Shape / type | Convention |
+| :--- | :--- | :--- |
+| `data` (2D) | `(M, N)` array | `M` spatial points (rows) by `N` dates (columns). `NaN` marks a missing value. The input is copied and handled in `float32`. |
+| `data` (3D) | `(N, Y, X)` array = `(time, lat, lon)` | Requires `mask`. The output has the same shape; points outside `mask` stay `NaN`. |
+| `mask` | `(Y, X)` boolean array | `True` for the pixels to reconstruct (water). If omitted, pixels that have at least one valid value are used. |
+| `time_coords` | length `N`, datetime or numeric | Dates. Numeric values are read as days; datetimes are converted to decimal days. They define the time steps of the temporal filter, so `alpha` is in days$^2$. |
+| Values `<= threshold` | | Set to `NaN` before the optional log transform. With `apply_log=True`, values `<= 0` are also treated as missing. |
+
+The call fails with `ValueError` if fewer than 100 valid observations remain or if `nev >= N`. When `use_climatology=True`, the per-pixel temporal mean is removed before the decomposition and added back afterwards; otherwise one global mean is used.
+
+**Pipeline `run_reconstruction_pipeline(...)`**
+
+| File | Layout |
+| :--- | :--- |
+| `input_nc` | NetCDF with a variable `var_name` of dimensions `(time, lat, lon)` and coordinate variables named `time`, `lat` and `lon` (1D, or 2D for curvilinear grids). Missing values: `NaN` or the variable `_FillValue`. The attribute `units` is copied to the output. |
+| `mask_file` | NetCDF with a 2D variable named `mask`; pixels equal to `1` are reconstructed. Either on the grid of `input_nc`, or a sub-region of it with its own `lat`/`lon` (the pipeline then aligns the two by coordinates). The cube is cropped to the bounding box of the mask. |
+
+### Outputs
+
+**`dineof(...)` returns `(X_out, meta)`.** `X_out` has the shape and units of the input (original observations preserved when `keep_observations=True`). Main entries of `meta`:
+
+| Key | Content |
+| :--- | :--- |
+| `n_opt` | Number of EOF modes retained ($k_{\text{opt}}$). Compare with `nev_used`. |
+| `nev_used` | Ceiling of the rank search that was actually used. |
+| `valcopt`, `sigma_o` | Pooled CV RMSE at `n_opt` (in the working space: ln units if `apply_log=True`). |
+| `valc` | CV RMSE for each explored rank (the CV curve). |
+| `var_ratio`, `varini`, `varend` | Explained-variance diagnostics. |
+| `u`, `s`, `v` | Spatial modes, singular values and temporal modes of the retained solution. |
+| `cv_rows`, `cv_cols`, `cv_truth`, `cv_pred` | Position, truth and prediction of the withheld cross-validation points (physical units). |
+| `obs_mask`, `clim`, `final_iters`, `disk_file`, `timings` | Observation mask, climatology, iterations of the final pass, memmap path (if `use_disk`), timings (if `debug=True`). |
+
+**`run_reconstruction_pipeline(...)` returns `None`** and writes into `out_dir`:
+
+| File | Content |
+| :--- | :--- |
+| `DINEOF_Reconstructed_<var>.nc` | `data`: reconstructed variable in physical units. `error`: OI error as a standard deviation in physical units ([§3](#3-in-stream-optimal-interpolation-oi-analysis-error), [§4](#4-exact-analytical-physical-error-for-log-normal-distributions)). `error_rel`: relative error $r_t(m) = P_t(m)/B(m) \in [0, 1]$ (0 = fully constrained by the data, 1 = no more information than the background). Dimensions `(time, lat, lon)`; `time` is stored in seconds since 1970-01-01. |
+| `Error_Matrix_<var>.csv` | One row of metrics: `Modes_Optimum`, `Variance_Initial`, `Variance_Reconstructed`, `Variance_Ratio`, `Scale_Mode`, `Sigma_o_ln`, `Sigma_o_log10`, `RMSE_Transformed`, `Bias_Transformed`, `R2_Transformed`, `RMSE_Physical`, `Bias_Physical`, `OI_Mean_Error`. The `*_Transformed` metrics are computed on the CV points in the log scale when `apply_log=True`. |
+| `Error_Profile_<var>.csv` | Error profile across concentration deciles. |
+| `Dashboard_<var>.png` | 6-panel figure: hexbin scatter (truth vs. prediction), error across concentration deciles, mode-selection curve, maps of the mean analysis error and of the mean relative error, temporal error evolution. |
+| `QMap_Transfer_Curve_<var>.png` | Only with `apply_qmap=True`. |
+
+The selection made by the Barnes refinement gate (pair $\sigma$, $\sigma_t$, and whether the refinement was kept) is printed in the console log.
+
+### Parameters of `dineof(...)`
+
+Defined in `core/main.py`. All defaults below are read from the function signature.
+
+| Parameter | Type | Default | Role and advice |
+| :--- | :--- | :--- | :--- |
+| `data` | `ndarray` | *required* | 2D `(M, N)` or 3D `(time, lat, lon)` array with `NaN` for missing values. |
+| `time_coords` | `ndarray` or `None` | `None` | Dates (datetime, timestamps or days). Needed for `alpha > 0` on irregular series. |
+| `mask` | `ndarray` or `None` | `None` | 2D boolean domain mask `(lat, lon)`; required for 3D `data`. |
+| `apply_log` | `bool` | `False` | Reconstruct $\ln X$ and exponentiate afterwards. Use for strictly positive, log-normal tracers. |
+| `use_climatology` | `bool` | `False` | Remove the per-pixel temporal mean (instead of one global mean) before the decomposition. |
+| `keep_observations` | `bool` | `True` | `True`: original valid values are kept, only gaps are filled. `False`: returns the filtered low-rank field everywhere. |
+| `exclude_cv_in_final` | `bool` | `True` | Leaves the CV points out of the final convergence pass, as DINEOF GHER does, so the fitted model is the one that was validated; the genuine observations are put back in the output when `keep_observations=True`. `False` restores them as data before the final pass. On the benchmark cases `True` lowers the test RMSE by 0.3-0.6 %. |
+| `threshold` | `float` or `None` | `None` | Values $\le$ `threshold` become `NaN`. |
+| `nev` | `int` or `None` | `None` | Ceiling of the rank search (must be `< N`). `None`: estimated from the explained variance and clipped to 6-30. It bounds $k$: when `meta['n_opt'] == nev`, the CV optimum may be higher; increase `nev`. The benchmarks use `nev=30`. |
+| `toliter` | `float` | `1e-3` | Relative RMS convergence threshold of the iteration, $\text{RMS}(dx)/\text{stdvini}$. |
+| `nitemax` | `int` | `300` | Maximum iterations per mode. |
+| `alpha` | `float` | `0.01` | Strength of the temporal Laplacian filter (days$^2$). `0` disables it. For `alpha > 0` each mode is scaled by $\sqrt{\lambda_{\text{filtered}}/v^{T}Bv}$, the DINEOF GHER convention ([§1](#1-unconditionally-stable-1d-implicit-temporal-diffusion)). |
+| `numit` | `int` | `3` | Number of diffusion passes applied to the covariance matrix. |
+| `cv_ratio` | `float` | `0.02` | Fraction of the valid observations withheld, as isolated points, for cross-validation (capped at 5 % of them). |
+| `cv_patch_size` | `int` or `None` | `None` | **Deprecated and ignored** (the 2D patch hold-out was removed; isolated points select the same rank as DINEOF GHER). |
+| `cv_max_points` | `int` or `None` | `500_000` | Upper bound on the number of withheld points. |
+| `cv_patience` | `int` | `3` | The rank search stops after `cv_patience` consecutive modes without a new CV minimum. DINEOF GHER instead needs three consecutive increases and resets its counter on a small dip, so it may go further on flat plateaus. |
+| `n_cv_runs` | `int` or `None` | `None` | **Deprecated and ignored.** |
+| `min_improvement` | `float` | `0.0` | Minimum relative CV gain required to try another mode (`0` disables this criterion). |
+| `subsample_ratio` | `float` | `1.0` | Fraction of the rows used to build the temporal covariance (`1.0` = exact). |
+| `subsample_min` | `int` | `5_000_000` | Matrix size below which `subsample_ratio` is ignored. |
+| `seed` | `int` or `None` | `42` | Seed of the hold-out selection and of the subsampling. |
+| `verbose` | `bool` | `True` | Print progress. |
+| `use_disk` | `bool` | `False` | Store the working matrix in a temporary `numpy.memmap`; for matrices that do not fit in RAM. |
+| `solver` | `str` | `'dense'` | `'dense'` (LAPACK), `'lanczos'`, `'randomized'`, or `'auto'` (dense up to $N^*(k) \approx \max(70, 10k)$ dates and for short series, Lanczos above). Note: `run_reconstruction_pipeline` defaults to `'auto'`. |
+| `n_threads` | `int` or `None` | `None` | Threads of the updates and of the covariance product. `None`: `NUMBA_NUM_THREADS` if set, otherwise one thread per `DINEOF_ELEMS_PER_THREAD` matrix elements (default 500,000), capped by the larger of the physical cores and three quarters of the CPUs available to the process. BLAS stays single-threaded during the call. |
+| `debug` | `bool` | `False` | Collect timings in `meta['timings']` (and print them if `verbose`). |
+
+### Parameters of `run_reconstruction_pipeline(...)`
+
+Defined in `core/io_utils.py`.
+
+| Parameter | Type | Default | Role and advice |
+| :--- | :--- | :--- | :--- |
+| `input_nc` | `str` | *required* | Input NetCDF cube. |
+| `mask_file` | `str` | *required* | NetCDF file with the variable `mask`. |
+| `var_name` | `str` | *required* | Variable to reconstruct. |
+| `out_dir` | `str` | *required* | Output directory (created if needed). |
+| `threshold` | `float` or `None` | `None` | Values $\le$ `threshold` become `NaN` on loading. |
+| `vmax` | `float` or `None` | `None` | Upper physical bound: larger observations are set to `NaN` before the reconstruction, and the output is bounded. |
+| `min_valid_ratio` | `float` | `0.01` | Dates with a smaller fraction of valid pixels are blanked and fully reconstructed (`0.0` keeps all dates as they are). |
+| `apply_log` | `bool` | `True` | Work on $\ln X$. Set `False` for variables that can be zero or negative. |
+| `use_climatology` | `bool` | `True` | Per-pixel centering. |
+| `apply_qmap` | `bool` | `False` | Quantile mapping (opt-in, no demonstrated benefit; [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate)). |
+| `qmap_nb_quantiles` | `int` | `100` | Number of points of the quantile transfer curve. |
+| `apply_local_refinement` | `bool` | `False` | Barnes refinement of the gaps ([§6](#6-local-residual-objective-analysis-barnes-refinement), [§7](#7-space-time-barnes-refinement)). Recommended for coastal imagery. |
+| `local_refinement_mode` | `str` | `'spatial'` | `'spatial'`: per-date 2D analysis. `'spacetime'`: 3D space-time analysis (the one evaluated in the benchmarks). |
+| `local_refinement_sigma` | `float`, list or `None` | `None` | Spatial bandwidth(s) in pixels. `None`: candidates arbitrated on the CV points ($[1.5, 2.5, 3.5, 5, 7]$ in `'spatial'` mode, $[1.5, 3.5, 7, 10, 15]$ in `'spacetime'` mode). |
+| `local_refinement_sigma_t` | `float`, list or `None` | `None` | Temporal bandwidth(s) in dates, `'spacetime'` only. `None`: $[0, 1, 2]$ arbitrated on the CV points. |
+| `use_disk` | `bool` | `False` | Forwarded to `dineof` (ignored if also set in `dineof_kwargs`). |
+| `solver` | `str` | `'auto'` | Forwarded to `dineof` (ignored if also set in `dineof_kwargs`). |
+| `dineof_kwargs` | `dict` or `None` | `None` | Any parameter of `dineof(...)` (`nev`, `toliter`, `alpha`, `cv_ratio`, `cv_patience`, `subsample_ratio`, `n_threads`, `keep_observations`, `verbose`, `debug`...). The refinement options may also be given here and then take precedence. |
+| `corr_length_km` | `float`, `'auto'` or `None` | `'auto'` | Correlation length $L$ of the observation error in the OI error ([§3](#3-in-stream-optimal-interpolation-oi-analysis-error)). `'auto'` estimates it (50 km fallback), a number fixes it, `None` or `0` disables the correction (the error is then far too optimistic on satellite data). |
+
+When the refinement is on, the core engine is run with `keep_observations=False` and the genuine observations are restored after the refinement; the `keep_observations` value passed in `dineof_kwargs` applies to the final output.
+
+---
+
+## Benchmarks
+
+DINEOF-HPC was compared with the reference code **DINEOF GHER** (v2.0.0) on three contrasting coastal and estuarine satellite series. All figures below are taken from the article in preparation (Masson et al., *DINEOF-HPC v1.0*, submitted to Geoscientific Model Development); the benchmark scripts and data are not part of this repository. DINEOF-HPC is the code of this repository (commit `9452143`).
+
+### Protocol
+
+| Zone | Sensor and variable | Resolution | Sea pixels $M$ | Dates $N$ | $M \times N$ | Period | Missing (input / training) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Z1** Gulf of Lion | MODIS-Aqua chlorophyll-*a*, daily | 4 km | 1,999 | 1,082 | $2.2 \times 10^{6}$ | 2022-2024 | 62.7 % / 64.6 % |
+| **Z2** Opal Coast | Sentinel-3 OLCI chlorophyll-*a*, daily | 300 m | 26,344 | 273 | $7.2 \times 10^{6}$ | 2022 | 46.5 % / 49.4 % |
+| **Z3** Gironde estuary | Sentinel-2 MSI suspended particulate matter, 5-day | 60 m | 287,352 | 139 | $4.0 \times 10^{7}$ | 2021-2023 | 38.5 % / 41.6 % |
+
+* **Test set.** For each zone and each of 3 random seeds, 5 % of the valid observations are withheld by transplanting the **real cloud masks of other dates** (donor scenes with 5-80 % cloud cover) onto the clearest scenes, keeping at least 20 % of observed sea pixels per scene. These gaps are realistic, multi-scale and independent of the isolated points used for the internal cross-validation. The study therefore has 9 cases (3 zones x 3 seeds).
+* **Preprocessing** is done once, outside both codes, so that both receive exactly the same input cube: natural logarithm, pixels with fewer than 3 training observations masked, per-pixel training mean subtracted.
+* **Metric.** Test RMSE in natural-log units, on the withheld points only (about 41,000 / 198,000 / 1,260,000 per seed on Z1 / Z2 / Z3). Values are means over the 3 seeds. Differences were tested with paired scene-level tests (cluster block bootstrap and Wilcoxon signed-rank test, one transplanted cloud event = one independent unit).
+* **Machine.** Intel Core i9-13900 (8 performance + 16 efficiency cores, 32 threads), 64 GB RAM, Ubuntu under WSL2. DINEOF GHER: `gfortran -O3`, double precision, OpenBLAS with 8 threads (its best setting on this machine). DINEOF-HPC: Python 3.11, Numba, automatic thread selection, `float32`. Common settings: `toliter=1e-3`, `nev=30`, `alpha=0.01` unless stated, 2 % isolated cross-validation points. Times are wall-clock seconds.
+
+### Equivalence with DINEOF GHER
+
+When both codes receive the same cross-validation points and the same rank $k$ (here $\alpha = 0$, seed 1; $k = 30$, 13 and 5 on Z1, Z2, Z3), the test RMSEs agree within 0.13 %:
+
+| Zone ($k$) | DINEOF-HPC | DINEOF GHER | Difference | 95 % interval | Wilcoxon $p$ |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| Z1 ($k = 30$) | 0.5613 | 0.5614 | -0.02 % | [-0.10, +0.08] % | 0.52 |
+| Z2 ($k = 13$) | 0.3375 | 0.3372 | +0.10 % | [-0.06, +0.24] % | 0.52 |
+| Z3 ($k = 5$) | 0.5335 | 0.5341 | -0.13 % | [-0.29, +0.00] % | 0.24 |
+
+With the temporal filter on ($\alpha = 0.01$, $k = 13$ on Z2, seed 1) the difference is 0.06 % (0.29011 vs. 0.29028). On Z2 the first three EOFs match to within 0.05-0.35 % in singular value, with spatial and temporal mode cosines above 0.99995. These agreements require `exclude_cv_in_final=True` and the mode scaling for `alpha > 0` (default behaviour).
+
+At default settings each code selects its own rank by cross-validation; the remaining differences (-0.7 % to +0.8 % in test RMSE) come from the rank chosen, and none is significant overall (see below).
+
+### Speed
+
+Mean wall-clock time over the 3 seeds (HPC with automatic threads).
+
+| Zone | DINEOF GHER, $\alpha = 0.01$ | DINEOF-HPC, $\alpha = 0.01$ | Speed-up | DINEOF GHER, $\alpha = 0$ | DINEOF-HPC, $\alpha = 0$ | Speed-up |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Z1 Gulf of Lion | 644 s | 147 s | x4 | 1,026 s | 44 s | x24 |
+| Z2 Opal Coast | 2,000 s (33 min) | 52 s | x39 | 1,979 s | 36 s | x56 |
+| Z3 Gironde (60 m) | 3,951 s (66 min) | 64 s | x62 | 5,000 s | 70 s | x71 |
+
+* The gain grows with the number of pixels. On the long daily Z1 series the default search runs up to the `nev = 30` ceiling, which limits the gain.
+* At equal rank ($k = 30$, 13, 5), DINEOF-HPC takes 48 s, 55 s and 145 s against 1,208 s, 2,008 s and 5,057 s for DINEOF GHER (x25, x37, x35): this is the per-iteration gain; the rest comes from earlier stopping on flat CV plateaus.
+
+### Accuracy
+
+Mean test RMSE (natural-log units), mean $\pm$ s.d. over the 3 seeds; $k$ is the selected rank for seeds 1/2/3. "Barnes ST" is DINEOF-HPC followed by the space-time Barnes refinement (`local_refinement_mode='spacetime'`, [§7](#7-space-time-barnes-refinement)).
+
+**Default temporal filter, $\alpha = 0.01$** (relative differences with respect to DINEOF GHER):
+
+| Zone | DINEOF GHER ($k$) | DINEOF-HPC ($k$) | DINEOF-HPC + Barnes ST | Time with Barnes ST |
+| :--- | :---: | :---: | :---: | :---: |
+| Z1 | 0.2548 $\pm$ 0.007 (30/30/30) | 0.2530 $\pm$ 0.004 (30/30/30), **-0.7 %** | 0.2456 $\pm$ 0.003, **-3.6 %** | 150 s |
+| Z2 | 0.2636 $\pm$ 0.004 (28/28/30) | 0.2656 $\pm$ 0.004 (19/25/26), **+0.8 %** | 0.2556 $\pm$ 0.003, **-3.0 %** | 65 s |
+| Z3 | 0.5434 $\pm$ 0.057 (5/6/5) | 0.5451 $\pm$ 0.059 (5/6/5), **+0.3 %** | 0.5192 $\pm$ 0.063, **-4.5 %** | 162 s |
+
+**No temporal filter, $\alpha = 0$:**
+
+| Zone | DINEOF GHER ($k$) | DINEOF-HPC ($k$) | DINEOF-HPC + Barnes ST |
+| :--- | :---: | :---: | :---: |
+| Z1 | 0.4923 $\pm$ 0.064 (30/30/30) | 0.4926 $\pm$ 0.063 (30/30/30) | 0.4880 $\pm$ 0.064 |
+| Z2 | 0.3228 $\pm$ 0.016 (13/12/12) | 0.3134 $\pm$ 0.026 (13/14/12) | 0.3014 $\pm$ 0.027 |
+| Z3 | 0.5455 $\pm$ 0.053 (5/6/6) | 0.5451 $\pm$ 0.053 (5/6/6) | 0.5198 $\pm$ 0.055 |
+
+What these results show:
+
+* **Equivalent accuracy at default settings.** DINEOF-HPC vs. DINEOF GHER: -0.71 % (Z1), +0.73 % (Z2), +0.33 % (Z3). The 95 % bootstrap intervals include zero on Z2 and Z3; on Z1 the Wilcoxon test gives $p = 0.12$ (the bootstrap interval just excludes zero, $p = 0.045$) and on Z2 $p = 0.037$, so differences of this size are at the limit of detectability. The two seed-level differences with $p < 0.05$ are Z1 seed 2 (-2.3 %, in favour of DINEOF-HPC) and Z2 seed 2 (+1.4 %, in favour of DINEOF GHER, caused by the earlier stop of the rank search on a flat plateau: $k = 25$ vs. $28$).
+* **Space-time Barnes refinement.** It lowers the test RMSE of the default DINEOF-HPC run by 2.9 % (Z1), 3.8 % (Z2) and 4.7 % (Z3), i.e. **-3 % to -5 %**, highly significant on every zone and every seed ($p < 10^{-8}$ pooled; $p \le 0.008$ on each of the 9 seeds). Against DINEOF GHER the gain is -3.6 %, -3.0 % and -4.5 % on the mean RMSE (paired tests: $p < 10^{-3}$ on every zone). Overhead: +3 s on Z1, +3 to +20 s on Z2, +90 to +105 s on Z3. On unfiltered Z1 the gain is only -0.9 %.
+* **Temporal filter.** `alpha = 0.01` lowers the test RMSE by 48.9 % on the daily Z1 series and 15.6 % on the daily Z2 series (both highly significant), and is neutral on the 5-day Z3 series (+0.07 %, $p = 0.67$). Without the filter the isolated-point cross-validation selects $k = 30$ on Z1 where the test optimum is $k = 5$ (0.360 vs. 0.493).
+* **Rank search.** On Z1 both codes reach the `nev = 30` ceiling; `nev = 50` gives only -1.2 % (0.2500) for a x1.45 run time (213 s vs. 147 s). On Z2 the CV curve is flat between $k = 19$ and $30$ (< 1 %). On Z3 the CV minimum is at $k = 5$-6 whereas the test optimum is at $k \approx 17$-18 (0.517): the Barnes refinement at $k = 5$-6 (0.5192) recovers this gain without computing 18 modes.
+
+### Scaling to Multi-Million-Pixel Grids
+
+The Gironde series was also prepared at 40 m and 20 m (seed 1, `alpha = 0.01`):
+
+| Resolution | Sea pixels | DINEOF-HPC | DINEOF GHER | Speed-up |
+| :--- | :---: | :---: | :---: | :---: |
+| 60 m | 287,352 | 46 s | 3,574 s | x78 |
+| 40 m | 646,660 | 89 s | 7,901 s | x89 |
+| 20 m | 2,580,746 | 308 s (5.1 min) | 34,340 s (9.5 h) | x112 |
+
+At 20 m ($M \times N = 3.6 \times 10^{8}$), DINEOF-HPC needs 25 % less peak memory (13.5 GB vs. 17.9 GB) and reaches a test RMSE of 0.547 vs. 0.551. At $\alpha = 0$ the DINEOF GHER run takes 11.4 h.
+
+### Benchmark Limits
+
+* Three zones (two chlorophyll-*a* products, one turbidity product), three cloud-transplant seeds each; no sea-surface temperature, multivariate or non-French-coastal case was tested, and the 40 m and 20 m runs rely on a single seed.
+* Times come from one workstation (i9-13900, WSL2); the speed-up depends on the number of cores and on the BLAS library used by DINEOF GHER.
+* The `nev = 30` ceiling is reached on Z1 (see above).
+* Isolated-point cross-validation, kept identical to DINEOF GHER, does not target extrapolation inside large cloud gaps; it can select a rank that is too high (unfiltered Z1) or too low (Z3). The Barnes refinement compensates on Z3 but does not remove the cause.
+* Reconstructions retain only 43-66 % of the observed spatial variance inside gaps that are at least 85 % withheld (variance loss typical of truncated EOF projections); the gain of the Barnes refinement is largest where gaps are small or short-lived.
+* The OI error is an indicator: with `corr_length_km='auto'`, the 1$\sigma$ coverage on held-out test pixels is 66 % (Z1), 60 % (Z2) and 50 % (Z3) against 68.3 % for a Gaussian, and the 2$\sigma$ coverage 89 %, 87 % and 78 % against 95.4 %; the scaled error has a standard deviation of 1.4 to 2.1. Estimated correlation lengths: 12 km (Z1), 4-5 km (Z2), 3 km (Z3).
+* The Sentinel-2 SPM of Z3 comes from Sen2Cor level-2A reflectance: it is a benchmark tracer, not a validated product. The study evaluates gap filling, not the accuracy of the underlying retrieval.
+
+### Figures
+
+The article's figures (study zones, spatial equivalence maps, speed, accuracy, power spectra, RMSE as a function of $k$ and $\alpha$, and the supplementary figures) will be added to this section once the final versions are validated; none is embedded yet. The only figure currently in `Optional/` illustrates the effect of `keep_observations`, see [Implementation Details](#implementation-details).
 
 ---
 
@@ -247,7 +597,7 @@ $$\Delta(x, y, t) = \frac{(R * G_{\sigma, \sigma_t})(x, y, t)}{(M_{\text{obs}} *
 with $R = X_{\text{obs}} - X_{\text{rec}}$ (in $\ln$ space when `apply_log=True`, applied multiplicatively). A gap pixel then borrows the residual of observations that are close in space *and* in time, which matters on series where a cloud-covered pixel is clear a day before or after.
 
 * **Selection**: all pairs of $\sigma \in [1.5, 3.5, 7, 10, 15]$ pixels and $\sigma_t \in [0, 1, 2]$ dates are scored on the withheld cross-validation points (the residual field is built *without* them); the pair with the lowest CV RMSE is kept. The refinement is applied only if it lowers the CV RMSE of the unrefined reconstruction; otherwise it is switched off. $\sigma_t = 0$ is a purely spatial analysis.
-* **Use**: `run_reconstruction_pipeline(..., apply_local_refinement=True, local_refinement_mode='spacetime')`, optionally fixing `local_refinement_sigma` and/or `local_refinement_sigma_t` (a float, or a list of candidates). The selected values and the gate decision are stored in `meta['refinement']`. Genuine observations are never modified by the refinement itself.
+* **Use**: `run_reconstruction_pipeline(..., apply_local_refinement=True, local_refinement_mode='spacetime')`, optionally fixing `local_refinement_sigma` and/or `local_refinement_sigma_t` (a float, or a list of candidates). The selected values and the gate decision are printed in the console log. Genuine observations are never modified by the refinement itself.
 * **Cost and memory**: the whole `(time, lat, lon)` cube is filtered, so memory grows with the full grid size (a few float32 copies) and the candidate search costs 15 pairs of 3D Gaussian filters. On the benchmark zones it added from a few seconds (Gulf of Lion, Opal Coast) to about 100 s (Gironde, 60 m) to a default run, and reduced the test RMSE of the default run by 3 to 5 %.
 * **Limits**: the gain is largest where gaps are small or short-lived; inside wide, long-lasting gaps the kernel weight falls under the cutoff and the correction vanishes, leaving the plain EOF reconstruction. The correlation scales are global (one pair per run).
 * **Functions**: `arbitrate_spacetime_refinement` (selection) and `apply_spacetime_refinement` (application) in `dineof_hpc.core.io_utils`.
@@ -275,6 +625,12 @@ with $R = X_{\text{obs}} - X_{\text{rec}}$ (in $\ln$ space when `apply_log=True`
   $$\sum_{i=1}^{k_{\text{target}}} \lambda_{i} \ge 0.95 \cdot \text{Tr}(B_{0}) \implies k_{\text{est}} = \text{clip}(k_{\text{target}} + 3, 6, 30)$$
 
 ---
+* **Spectral solver selection (`solver='auto'`).** Temporal EOF modes come from diagonalizing $B = A^{T} A \in \mathbb{R}^{N \times N}$. LAPACK dense (`syevr`) performs a complete tridiagonal reduction in $\mathcal{O}(N^{3})$, invariant to $k$; ARPACK Lanczos (`eigsh`) and Randomized SVD instead solve reduced Krylov projections in $\mathcal{O}(k \cdot N^{2})$. `'auto'` applies the empirical crossover $N^*(k) \approx \max(70, 10k)$: dense LAPACK below, Lanczos above.
+* **Precomputed covariance subsampling.** When `subsample_ratio < 1` the spatial subsampling indices are frozen once at startup rather than redrawn every iteration, cutting covariance cost on large grids.
+* **Row-chunked Gram matrix and thread pools.** $A^{T}A$ is accumulated from row blocks computed concurrently with single-threaded BLAS, and BLAS is kept single-threaded during the EM loop so that it does not compete with the Numba kernels; the thread count follows the size of the problem (`n_threads`).
+* **Stationary background for OI.** The background covariance diagonal is computed once outside the temporal loop.
+
+---
 
 ## Software Architecture & Dataflow
 
@@ -285,15 +641,21 @@ DINEOF-HPC isolates raw array numerical algebra (`main.py`) from NetCDF dataset 
 ```text
 dineof_hpc/
 ├── pyproject.toml            # Build metadata & editable installation
-├── README.md                 # Technical documentation & formulation
+├── environment.yaml          # Conda environment (dependencies + editable install)
+├── README.md                 # Documentation
+├── LICENSE                   # GPL-3.0
+├── Optional/                 # Illustrations
+├── tests/                    # pytest suite (21 tests)
 └── src/
     └── dineof_hpc/
         ├── __init__.py
-        ├── example.py        # Batch execution script for HPC schedulers
+        ├── example.py        # Ready-to-edit batch script (conservative / fast profiles)
+        ├── example_CALC.py   # Batch examples for large datasets on HPC nodes
+        ├── Example_CALC_area.py
         └── core/
             ├── __init__.py
             ├── main.py       # Mathematical engine (NumPy / Numba JIT)
-            └── io_utils.py   # NetCDF I/O, streaming OI error, spatial refinement
+            └── io_utils.py   # NetCDF I/O, streaming OI error, Barnes refinement
 ```
 
 ### Computational Dataflow
@@ -324,7 +686,7 @@ dineof_hpc/
                 [ io_utils.run_reconstruction_pipeline ]
        +-------------------------------------------------------------+
        | 1. Precompute stationary background variance B_diag         |
-       | 2. Optional Barnes local residual refinement (2D Gaussian)  |
+       | 2. Optional Barnes refinement (2D per date or 3D space-time)|
        | 3. Cross-validation arbitration gate (support-masked CV)    |
        | 4. Optional: calibrate Quantile Mapping (apply_qmap=True)   |
        | 5. Evaluate KGE arbitration gate (deactivate if degraded)   |
@@ -341,204 +703,16 @@ dineof_hpc/
 
 ---
 
-## Installation
-
-**Required dependencies**: Python 3.10+; `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`; `numba`, `joblib`; `scikit-learn`, `matplotlib`, `tqdm`.
-
-```bash
-# Clone the repository
-git clone https://github.com/Julien-res/dineof_hpc.git
-cd dineof_hpc
-
-# Create conda environment
-conda create -n dineof_hpc python=3.11 -y
-conda activate dineof_hpc
-
-# Install dependencies
-conda install -c conda-forge numpy scipy pandas xarray netcdf4 numba scikit-learn matplotlib tqdm joblib -y
-
-# Install DINEOF-HPC in development mode
-pip install -e .
-```
-
----
-
-## Usage Examples
-
-### 1. Minimal In-Memory Example (NumPy Array)
-
-Calls the numerical core directly on NumPy arrays containing `NaN` values:
-
-```python
-import numpy as np
-from dineof_hpc.core.main import dineof
-
-# 1. Define synthetic dimensions (M points, N dates)
-M, N = 50_000, 120
-time_coords = np.arange(N, dtype=np.float32)
-
-# 2. Build rank-3 synthetic field with additive noise
-rng = np.random.default_rng(42)
-true_space = rng.standard_normal((M, 3), dtype=np.float32)
-true_time = rng.standard_normal((3, N), dtype=np.float32)
-X_synthetic = true_space @ true_time + 0.05 * rng.standard_normal((M, N), dtype=np.float32)
-
-# 3. Simulate 40% missing data
-cloud_mask = rng.uniform(0.0, 1.0, size=(M, N)) < 0.40
-X_synthetic[cloud_mask] = np.nan
-
-# 4. Run core DINEOF reconstruction
-X_rec, meta = dineof(
-    data=X_synthetic,
-    time_coords=time_coords,
-    nev=10,
-    toliter=1e-3,
-    alpha=0.01,
-    numit=3,
-    subsample_ratio=0.2,
-    verbose=True
-)
-
-print(f"Optimal EOF rank retained : {meta['n_opt']}")
-print(f"Out-of-sample CV RMSE     : {meta['valcopt']:.5f}")
-print(f"Explained variance ratio  : {meta['var_ratio']:.2%}")
-```
-
-### 2. HPC Batch Execution (NetCDF Pipeline)
-
-#### Python Execution Script (`example.py`)
-
-```python
-from dineof_hpc.core.io_utils import run_reconstruction_pipeline
-
-DINE_OPTS = {
-    'nev': 30,
-    'toliter': 1e-3,
-    'nitemax': 300,
-    'alpha': 0.01,
-    'numit': 3,
-    'cv_ratio': 0.02,
-    'subsample_ratio': 0.1,  # Subsample covariance on massive grids
-    'use_disk': False,        # Fast in-memory execution on high-RAM nodes
-    'solver': 'dense',
-    'debug': True
-}
-
-run_reconstruction_pipeline(
-    input_nc="data/satellite_spm_series.nc",
-    mask_file="data/domain_water_mask.nc",
-    var_name="SPM",
-    out_dir="output_spm_reconstruction/",
-    min_valid_ratio=0.01,
-    apply_log=True,           # Suitable for log-normal environmental tracers
-    use_climatology=True,
-    apply_qmap=False,         # Optional, off by default (no demonstrated benefit, see §5)
-    apply_local_refinement=True, # Restore localized front gradients
-    local_refinement_sigma=None, # Auto-select optimal scale via CV arbitration gate
-    dineof_kwargs=DINE_OPTS
-)
-```
-
-#### Batch Submission Script (OAR / Slurm)
-
-On multi-socket architectures, distribute memory allocations across all NUMA channels:
-
-```bash
-# Configure OpenMP, BLAS, and Numba thread pools
-export OMP_NUM_THREADS=96
-export MKL_NUM_THREADS=96
-export OPENBLAS_NUM_THREADS=96
-export NUMBA_NUM_THREADS=96
-
-# Distribute allocations across NUMA nodes in round-robin
-numactl --interleave=all python -u example.py
-```
-
----
-
-## Input Parameters Reference
-
-### 1. Core Engine: `dineof(...)`
-
-Defined in `main.py`, processes 2D matrices `(M, N)` or 3D arrays `(time, lat, lon)`.
-
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `data` | `ndarray` | *Required* | 2D matrix `(M space, N time)` or 3D array `(time, lat, lon)` containing `np.nan` values. |
-| `time_coords` | `ndarray` or `None` | `None` | 1D temporal coordinate vector (datetime array, timestamps, or float days). |
-| `mask` | `ndarray` or `None` | `None` | 2D boolean spatial domain mask (`True` for water). Required if `data` is 3D. |
-| `apply_log` | `bool` | `False` | Applies natural logarithm transform $Y=\ln(X)$ and restores units upon completion. |
-| `use_climatology`| `bool` | `False` | Subtracts spatial per-pixel temporal mean before reconstruction. |
-| `keep_observations` | `bool` | `True` | If `True`, preserves original valid pixels. If `False`, returns the continuous filtered EOF field. |
-| `exclude_cv_in_final` | `bool` | `True` | Leaves the cross-validation points out of the final convergence pass, as DINEOF GHER does, so that the fitted model is the one validated; the genuine observations are put back in the output afterwards when `keep_observations=True`. `False` restores the CV points as data before the final pass (earlier behaviour). On the benchmark cases it lowers the test RMSE by 0.3-0.6 % and makes the gap-filling identical to DINEOF GHER at equal $k$. |
-| `threshold` | `float` or `None` | `None` | Lower physical threshold; values $\le$ threshold are cast to `NaN`. |
-| `nev` | `int` or `None` | `None` | Maximum EOF modes to explore (`nev < N`). If `None`, estimated via `_estimate_nev` (clipped to 6-30). It is a hard ceiling for the rank search: when the reported `n_opt` equals `nev`, the true CV optimum may be higher and `nev` should be increased. |
-| `toliter` | `float` | `1e-3` | Relative iteration RMS convergence threshold: $\text{RMS}(dx)/\text{stdvini}$. |
-| `nitemax` | `int` | `300` | Maximum iterations permitted per mode. |
-| `alpha` | `float` | `0.01` | 1D implicit Laplacian temporal diffusion coefficient (units: days², `time_coords` in days). `0` disables the filter. When `alpha > 0` each mode is also scaled by $\sqrt{\lambda_{\text{filtered}} / v^{T}Bv}$, the reference DINEOF convention (see §1). On our benchmarks `0.01` helps strongly on daily series (Z1, Z2) and is neutral to slightly harmful on 5-day series (Z3); use `0` for very sparse dates. |
-| `numit` | `int` | `3` | Number of diffusion iterations applied to the covariance matrix. |
-| `cv_ratio` | `float` | `0.02` | Fraction of valid observations withheld, as isolated points, for cross-validation (capped at 5 %). |
-| `cv_patch_size` | `int` or `None` | `None` | Deprecated and ignored (the 2D patch hold-out was removed: on the benchmark cases isolated points select the same number of modes as DINEOF GHER and give the same test RMSE at the default `alpha`). |
-| `cv_max_points` | `int` or `None` | `500_000` | Maximum evaluation points ceiling to prevent memory bottlenecks. |
-| `cv_patience` | `int` | `3` | The rank search stops once `cv_patience` further modes have been explored after the best CV RMSE without a new minimum (as in DINEOF GHER). A larger value is more robust to a flat or noisy CV curve at the cost of a few more modes. |
-| `n_cv_runs` | `int` or `None` | `None` | Deprecated and ignored. |
-| `min_improvement`| `float` | `0.0` | Minimum relative CV gain required to justify higher mode increments. |
-| `subsample_ratio`| `float` | `1.0` | Spatial subsampling fraction for temporal covariance calculation (1.0 = exact). |
-| `subsample_min` | `int` | `5_000_000`| Spatial points threshold above which `subsample_ratio` is applied. |
-| `seed` | `int` or `None` | `42` | Random seed ensuring deterministic hold-out selection and subsampling. |
-| `verbose` | `bool` | `True` | Prints iteration counts, explained variance, and pooled RMSE to console. |
-| `use_disk` | `bool` | `False` | Enables disk caching via `numpy.memmap`. Keep `False` on high-memory nodes (>= 256 GB RAM). |
-| `solver` | `str` | `'auto'` | Eigensolver selection (`'auto'`, `'dense'`, `'lanczos'`, `'randomized'`). |
-| `n_threads` | `int` or `None` | `None` | Compute threads for the updates and the covariance product. `None` uses `NUMBA_NUM_THREADS` if set, otherwise one thread per `DINEOF_ELEMS_PER_THREAD` elements of the sea-pixel x time matrix (default 500,000), capped by the larger of the physical cores and three quarters of the CPUs available to the process. BLAS stays single-threaded during the call. |
-| `debug` | `bool` | `False` | Enables timing profiling across covariance, SVD, update, and CV stages. |
-
-### 2. High-Level Pipeline: `run_reconstruction_pipeline(...)`
-
-Defined in `io_utils.py`, coordinates file-to-file batch reconstruction with streaming OI error.
-
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `input_nc` | `str` | *Required* | Path to input primary NetCDF dataset. |
-| `mask_file` | `str` | *Required* | Path to binary 2D mask NetCDF file. |
-| `var_name` | `str` | *Required* | Variable name inside `input_nc`. |
-| `out_dir` | `str` | *Required* | Output directory for reconstructed NetCDF, CSV tables, and dashboard figures. |
-| `threshold` | `float` or `None` | `None` | Lower physical bound filter; values $\le$ threshold are cast to `NaN`. |
-| `vmax` | `float` or `None` | `None` | Optional physical upper bound filter applied post-reconstruction. |
-| `min_valid_ratio` | `float` | `0.01` | Coverage threshold below which dates are blanked to `NaN` and fully reconstructed (`0.0` leaves raw measurements intact). |
-| `apply_log` | `bool` | `True` | Applies logarithmic transformation inside the engine (for log-normal tracers). |
-| `use_climatology` | `bool` | `True` | Applies per-pixel climatological centering. |
-| `apply_qmap` | `bool` | `False` | Enables uncertainty-modulated Quantile Mapping (opt-in; no demonstrated benefit, see [§5](#5-tracer-agnostic-quantile-mapping-with-kge-arbitration-gate)). |
-| `qmap_nb_quantiles` | `int` | `100` | Number of quantile evaluation bins. |
-| `apply_local_refinement` | `bool` | `False` | Enables post-reconstruction Barnes local residual objective analysis. |
-| `local_refinement_sigma` | `float`, list or `None` | `None` | Standard deviation in pixels of the Gaussian kernel for residual refinement. If `None`, candidate scales are arbitrated via cross-validation ($[1.5, 2.5, 3.5, 5.0, 7.0]$ in `'spatial'` mode, $[1.5, 3.5, 7, 10, 15]$ in `'spacetime'` mode). |
-| `local_refinement_mode` | `str` | `'spatial'` | `'spatial'`: per-date 2D Barnes analysis ([§6](#6-local-residual-objective-analysis-barnes-refinement)). `'spacetime'`: 3D space-time analysis ([§7](#7-space-time-barnes-refinement)). Only used with `apply_local_refinement=True`. |
-| `local_refinement_sigma_t` | `float`, list or `None` | `None` | Temporal bandwidth(s) in dates for `'spacetime'` mode. If `None`, $[0, 1, 2]$ is arbitrated via cross-validation. |
-| `use_disk` | `bool` | `False` | Forwards out-of-core disk caching to `dineof`. |
-| `solver` | `str` | `'auto'` | Eigensolver forwarded to core engine (`'auto'`, `'dense'`, `'lanczos'`, `'randomized'`). |
-| `dineof_kwargs` | `dict` or `None` | `None` | Keyword arguments forwarded directly to `dineof(...)` (e.g. `{'debug': True, 'nev': 30, 'toliter': 1e-3, 'subsample_ratio': 0.1}`). |
-| `corr_length_km` | `float`, `'auto'` or `None` | `'auto'` | Correlation length $L$ of the observation error used by the OI error ([§3](#3-in-stream-optimal-interpolation-oi-analysis-error)). `'auto'` estimates it from the autocorrelation of the EOF residual (50 km fallback); a number fixes it; `None` or `0` disables the correction. |
-
-> **Note**: All parameters accepted by the core `dineof(...)` engine (such as `debug`, `nev`, `toliter`, `alpha`, `numit`, `cv_ratio`, `subsample_ratio`, and `cv_patience`) are passed dynamically through the `dineof_kwargs` dictionary.
-
----
-
-## Output Deliverables & Diagnostics
-
-Every execution of `run_reconstruction_pipeline` produces three deliverables in `out_dir`:
-
-1. **Reconstructed NetCDF (`DINEOF_Reconstructed_<var>.nc`)**: `data` (reconstructed variable, physical units restored), `error` (analytical OI standard deviation $\sigma_{\text{phys}}$), `error_rel` (relative error ratio $r_t(m) = P_t(m) / B(m) \in [0, 1]$).
-2. **Metrics Table (`Error_Matrix_<var>.csv`)**: `Modes_Optimum` ($k_{\text{opt}}$), `Sigma_o_ln`/`Sigma_o_log10`, `RMSE_Transformed`/`Bias_Transformed`/`R2_Transformed`, `RMSE_Physical`/`Bias_Physical`, `OI_Mean_Error`.
-3. **Dashboard Summary (`Dashboard_<var>.png`)**: 6-panel figure - hexbin scatter (truth vs. prediction), spectral error profile across concentration deciles, mode-selection convergence curve, spatial map of mean analysis error, spatial map of mean relative error, temporal error evolution.
-
----
-
 ## Known Limitations
 
-* **OI error is an indicator**, not an exact error bar: on held-out test points the 1σ coverage is typically 50-70 % (68 % expected) and the 2σ coverage 75-90 %.
-* **`nev` ceiling**: with `alpha > 0` on long daily series the CV optimum can lie at or beyond `nev = 30`; check `n_opt` against `nev`.
-* **Choice of the number of modes**: when the CV curve is flat (e.g. short 5-day series), the selected $k$ is sensitive to the hold-out sample, the seed and `cv_patience`.
-* **Single `alpha`**: `alpha` is a user-chosen constant (not cross-validated); the best value depends on the temporal sampling.
-* **Gap structure**: hold-out points are isolated pixels, which are easier to predict than large contiguous cloud gaps; the CV RMSE is therefore optimistic with respect to the error inside wide gaps. Reconstructions also retain less variance than the data inside large gaps.
+* **`nev` bounds the rank.** The search never goes beyond `nev` (30 in the benchmarks). With `alpha > 0` on long daily series the CV optimum can lie at or beyond it (Z1: `nev = 50` gives only -1.2 % for x1.45 run time). Check `meta['n_opt']` against `nev`.
+* **Choice of the number of modes.** Isolated-point cross-validation does not target extrapolation inside large gaps: it can select a rank that is too high (unfiltered Z1: $k = 30$, test optimum $k = 5$) or too low (Z3: $k = 5$-6, test optimum $k \approx 17$-18). When the CV curve is flat (Z2) the selected $k$ depends on the hold-out sample, the seed and `cv_patience`. The space-time Barnes refinement compensates for part of this on Z3.
+* **Variance loss in large gaps.** Reconstructions retain 43-66 % of the observed spatial variance inside gaps at least 85 % unobserved; the gap RMSE of the isolated CV points is optimistic with respect to wide contiguous cloud gaps.
+* **OI error is an indicator**, not an exact error bar: with `corr_length_km='auto'`, 1$\sigma$ coverage on held-out test pixels is 50-66 % (68.3 % expected) and 2$\sigma$ coverage 78-89 % (95.4 % expected); the scaled error has a standard deviation of 1.4-2.1. Without the correlation-length correction (`corr_length_km=None`) the error is far too small on satellite data (1$\sigma$ coverage of a few percent at 300 m).
+* **Single `alpha`.** `alpha` is a user-chosen constant, not cross-validated; the best value depends on the temporal sampling (useful on daily series, neutral on 5-day series).
+* **Threads.** The automatic thread count was calibrated on one machine (Intel Core i9-13900); on other architectures `n_threads` or `NUMBA_NUM_THREADS` may be worth tuning.
+* **Memory.** The working matrix is `float32` of size $M \times N$ (plus a few copies); the Barnes space-time refinement filters the whole `(time, lat, lon)` cube and needs a few more `float32` copies of the grid.
+* **Scope of the validation.** Three zones and variables (two chlorophyll-*a* products, one turbidity product); no sea-surface temperature or multivariate case was tested.
 * Optional Quantile Mapping showed no measurable benefit and is off by default.
 
 ---
@@ -550,7 +724,7 @@ pip install pytest
 pytest tests/
 ```
 
-The test-suite covers the isolated hold-out selection and the deprecated arguments, the exclusion of the CV points from the final pass, and the OI analysis error.
+The 21 tests cover the isolated hold-out selection and the deprecated arguments, the exclusion of the CV points from the final pass, the OI analysis error (including the correlation-length estimate) and the space-time Barnes refinement. They run in a few seconds on a laptop.
 
 ---
 
