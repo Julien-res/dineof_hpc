@@ -1,7 +1,7 @@
 {
   "title": "DINEOF-HPC: a high-performance Python/Numba implementation of DINEOF with space-time Barnes residual refinement (source code)",
   "upload_type": "software",
-  "description": "<p>Source code of DINEOF-HPC (<code>dineof_hpc</code>), a Python/Numba implementation of Data Interpolating Empirical Orthogonal Functions (DINEOF) for large satellite ocean-colour datasets, with cross-validation on isolated points, optimal-interpolation error estimates and space-time Barnes residual refinement. Archived release described in the Geoscientific Model Development paper (see related identifiers). Derived from pyDINEOF (Coqu&eacute;, RBINS) and compared with the Fortran DINEOF of the GHER group.</p>",
+  "description": "<p>Source code of DINEOF-HPC (<code>dineof_hpc</code>), a Python/Numba implementation of Data Interpolating Empirical Orthogonal Functions (DINEOF) for large satellite ocean-colour datasets, with cross-validation on isolated points, optimal-interpolation error estimates and space-time Barnes residual refinement. Derived from pyDINEOF (Coqu&eacute;, RBINS); reference implementation: DINEOF of the GHER group.</p>",
   "version": "1.0.0",
   "license": "GPL-3.0",
   "creators": [
