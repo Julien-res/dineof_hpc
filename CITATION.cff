@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "DINEOF-HPC: a high-performance Python/Numba implementation of DINEOF with space-time Barnes residual refinement"
+type: software
+version: 1.0.0
+date-released: 2026-11-09
+doi: 10.5281/zenodo.24083994
+license: GPL-3.0-only
+repository-code: "https://github.com/Julien-res/dineof_hpc"
+abstract: >-
+  Python/Numba implementation of Data Interpolating Empirical Orthogonal Functions (DINEOF)
+  for large satellite ocean-colour datasets, with cross-validation on isolated points,
+  optimal-interpolation error estimates and space-time Barnes residual refinement.
+keywords:
+  - DINEOF
+  - EOF
+  - gap filling
+  - ocean colour
+  - satellite
+  - Numba
+  - Python
+authors:
+  - family-names: Masson
+    given-names: Julien
+    orcid: "https://orcid.org/0009-0001-0028-7318"
+    affiliation: "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
+  - family-names: Coqué
+    given-names: Arthur
+    orcid: "https://orcid.org/0000-0003-1297-8228"
+    affiliation: "Royal Belgian Institute of Natural Sciences (RBINS), Brussels, Belgium"
+  - family-names: Verpoorter
+    given-names: Charles
+    orcid: "https://orcid.org/0000-0002-5134-4124"
+    affiliation: "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
+  - family-names: Jamet
+    given-names: Cédric
+    orcid: "https://orcid.org/0000-0001-6988-6506"
+    affiliation: "Univ. Littoral Côte d'Opale, LOG UMR 8187, CNRS, IRD, Univ. Lille, Wimereux, France"
