@@ -1,6 +1,6 @@
 # DINEOF-HPC
 
-![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue) ![Python Version](https://img.shields.io/badge/python-3.9%E2%80%933.14-blue)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24083994.svg)](https://doi.org/10.5281/zenodo.24083994) ![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue) ![Python Version](https://img.shields.io/badge/python-3.9%E2%80%933.14-blue)
 
 DINEOF-HPC is a high-performance Python implementation of the Data Interpolating Empirical Orthogonal Functions (DINEOF) algorithm, optimized for massive geophysical and satellite datasets on High-Performance Computing (HPC) architectures.
 
@@ -504,4 +504,18 @@ Distributed under the terms of the **GNU General Public License version 3 (GPLv3
 
 ## Citation
 
-Citation to be added upon publication. Until then, please cite this repository (Masson, J., DINEOF-HPC, https://github.com/Julien-res/dineof_hpc).
+If you use DINEOF-HPC, please cite the archived release (version 1.0.0, Zenodo DOI [10.5281/zenodo.24083994](https://doi.org/10.5281/zenodo.24083994)). The metadata are also available in [`CITATION.cff`](CITATION.cff).
+
+```bibtex
+@software{masson_dineof_hpc_2026,
+  author    = {Masson, Julien and Coqué, Arthur and Verpoorter, Charles and Jamet, Cédric},
+  title     = {{DINEOF-HPC}: a high-performance Python/Numba implementation of {DINEOF} with space-time Barnes residual refinement},
+  version   = {1.0.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.24083994},
+  url       = {https://github.com/Julien-res/dineof_hpc}
+}
+```
+
+The benchmark scripts and the data used for the evaluation against DINEOF GHER are archived separately on Zenodo (DOI [10.5281/zenodo.24084121](https://doi.org/10.5281/zenodo.24084121), CC BY 4.0; access restricted until the associated article is published). The article reference will be added here upon publication.
