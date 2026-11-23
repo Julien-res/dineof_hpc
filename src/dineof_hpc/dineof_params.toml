@@ -1,0 +1,37 @@
+# DINEOF-HPC parameters read by the example scripts (example.py, example_CALC.py,
+# Example_CALC_area.py) through dineof_hpc.config.load_dine_opts().
+# Each table is a profile; every key is passed to dineof() via `dineof_kwargs`.
+# A key that is absent takes the default of dineof() (see README, "Parameters").
+# Use another file with the DINEOF_CONFIG environment variable.
+
+[conservative]
+# nev: ceiling of the EOF rank search (must be < number of dates).
+#   absent (default) -> automatic: the ceiling is estimated from the covariance
+#                       (rank reaching 95 % of the variance, +3, clipped to 6-30).
+#   integer          -> fixed ceiling, e.g. nev = 30 for series of several hundred dates.
+# The cross-validation then picks the optimum k <= nev. If the result `n_opt` equals
+# nev, the ceiling cut the search: increase nev.
+# nev = 30
+toliter = 0.003            # Relative convergence tolerance.
+nitemax = 300              # Maximum iterations per EOF mode.
+alpha = 0.01               # Temporal diffusion strength (days^2); 0 disables the filter.
+cv_max_points = 500000     # Maximum number of validation points.
+cv_patience = 3            # Modes allowed after the CV minimum.
+keep_observations = true   # Preserve genuine observations exactly.
+subsample_ratio = 0.1      # Fraction of pixels used for covariance estimation (1.0 = exact).
+seed = 42                  # Reproducible sampling.
+verbose = true
+debug = true
+
+[fast]
+nev = 15                   # Fixed ceiling, no automatic rank estimation.
+toliter = 0.01
+nitemax = 50
+alpha = 0.01
+cv_max_points = 50000
+cv_patience = 1
+keep_observations = true
+subsample_ratio = 0.1
+seed = 42
+verbose = true
+debug = false

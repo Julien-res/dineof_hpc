@@ -14,10 +14,12 @@ eigensolver strategies. Array conventions are ``(space, time)`` internally and
 Mathematical & Methodological References:
     - Beckers, J. M., & Rixen, M. (2003). EOF calculations and data filling from
       incomplete oceanographic datasets. J. Atmos. Oceanic Technol., 20(12), 1839-1856.
-    - Beckers, J. M., et al. (2006). Error calculation on DINEOF data reconstruction
-      using an optimal interpolation approach. Ocean Science, 2(2), 79-99.
-    - Alvera-Azcarate, A., et al. (2009). The use of the temporal filter in DINEOF:
-      analysis of a Gulf of Mexico SST data set. Ocean Science, 5(4), 475-485.
+    - Beckers, J.-M., Barth, A., & Alvera-Azcarate, A. (2006). DINEOF reconstruction of
+      clouded images including error maps - application to the Sea-Surface Temperature
+      around Corsican Island. Ocean Science, 2(2), 183-199.
+    - Alvera-Azcarate, A., Barth, A., Sirjacobs, D., & Beckers, J.-M. (2009). Enhancing
+      temporal correlations in EOF expansions for the reconstruction of missing data
+      using DINEOF. Ocean Science, 5(4), 475-485.
 """
 
 from __future__ import annotations

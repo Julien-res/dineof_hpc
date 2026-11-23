@@ -13,6 +13,7 @@ dependencies:
   - scikit-learn
   - matplotlib
   - tqdm
+  - tomli
   - pip
   - pip:
       - -e .

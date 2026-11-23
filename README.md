@@ -59,7 +59,7 @@ The project originated as a fork of [`pyDINEOF`](https://github.com/acoque/pyDIN
 
 ## Installation
 
-**Requirements**: Python 3.9 to 3.14 (unit tests run on each; tested on Windows and Linux); `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (declared in `pyproject.toml`). `numba` compiles its kernels on first use, so the first call of `dineof(...)` in a session is slower.
+**Requirements**: Python 3.9 to 3.14 (unit tests run on each; tested on Windows and Linux); `numpy`, `scipy`, `pandas`, `xarray`, `netCDF4`, `numba`, `joblib`, `scikit-learn`, `matplotlib`, `tqdm` (declared in `pyproject.toml`), plus `tomli` on Python < 3.11 (for the parameter file read by the example scripts). `numba` compiles its kernels on first use, so the first call of `dineof(...)` in a session is slower.
 
 ```bash
 git clone https://github.com/Julien-res/dineof_hpc.git
@@ -73,7 +73,7 @@ conda activate dineof_hpc
 pip install -e .
 ```
 
-Check the installation (21 tests, a few seconds; a harmless `RuntimeWarning` about `numpy.ndarray size changed` may appear):
+Check the installation (24 tests, a few seconds; a harmless `RuntimeWarning` about `numpy.ndarray size changed` may appear):
 
 ```bash
 python -c "import dineof_hpc; print(dineof_hpc.__version__)"
@@ -177,7 +177,7 @@ For your own data, replace `var_name` and the paths, keep `apply_log=True` only 
 
 ### 3. Batch Execution on a Cluster
 
-Edit the paths in `src/dineof_hpc/example.py` (profiles `conservative` and `fast`) and submit it with your scheduler (OAR, Slurm...). The thread pool is sized from the problem and the CPUs available, so a plain call is enough; to impose a count, prefix it with `NUMBA_NUM_THREADS=32`:
+Edit the paths in `src/dineof_hpc/example.py` and the parameters in `src/dineof_hpc/dineof_params.toml` (profiles `conservative` and `fast`; see [Where to set `nev` and the other parameters](#where-to-set-nev-and-the-other-parameters)) and submit it with your scheduler (OAR, Slurm...). The thread pool is sized from the problem and the CPUs available, so a plain call is enough; to impose a count, prefix it with `NUMBA_NUM_THREADS=32`:
 
 ```bash
 python -u src/dineof_hpc/example.py
@@ -238,6 +238,15 @@ The call fails with `ValueError` if fewer than 100 valid observations remain or 
 
 The selection made by the Barnes refinement gate (pair $\sigma$, $\sigma_t$, and whether the refinement was kept) is printed in the console log.
 
+
+### Where to set `nev` and the other parameters
+
+In the example scripts (`example.py`, `example_CALC.py`, `Example_CALC_area.py`) the DINEOF parameters are no longer hard-coded: they are read from `src/dineof_hpc/dineof_params.toml`, one table per profile (`[conservative]`, `[fast]`), and passed to the pipeline as `dineof_kwargs`. Edit that file, or copy it and point to the copy with `DINEOF_CONFIG=/path/my_params.toml` (or `load_dine_opts("my_params.toml", "fast", nev=30)` for a single call; keyword arguments override the file). A key that is absent takes the default of the function signature, so existing scripts that pass their own `dineof_kwargs` dictionary keep working unchanged.
+
+`nev` is the ceiling of the EOF rank search, not the number of modes retained: cross-validation picks the optimum `k <= nev` (`meta['n_opt']`).
+
+* **`nev` absent** (TOML has no `null`; equivalent to `nev=None` in Python): the ceiling is estimated automatically from the explained variance. The rank reaching 95 % of the variance of the zero-filled covariance is increased by 3 and clipped to 6-30.
+* **`nev = 30`** (any integer `< N`): fixed ceiling. Recommended for series of a few hundred dates or more; if `n_opt == nev`, the ceiling cut the search, so increase it.
 
 ### Parameters
 
@@ -444,10 +453,12 @@ dineof_hpc/
 ├── environment.yaml          # Conda environment (dependencies + editable install)
 ├── README.md
 ├── LICENSE                   # GPL-3.0
-├── tests/                    # pytest suite (21 tests)
+├── tests/                    # pytest suite (24 tests)
 └── src/
     └── dineof_hpc/
         ├── __init__.py
+        ├── config.py         # load_dine_opts(): reads dineof_params.toml
+        ├── dineof_params.toml # DINEOF parameters (nev, alpha...) of the example scripts
         ├── example.py        # Ready-to-edit batch script (conservative / fast profiles)
         ├── example_CALC.py   # Batch examples for large datasets on HPC nodes
         ├── Example_CALC_area.py
@@ -480,16 +491,16 @@ pip install pytest
 pytest tests/
 ```
 
-The 21 tests cover the isolated hold-out selection and deprecated arguments, the exclusion of the CV points from the final pass, the OI analysis error (including the correlation-length estimate) and the space-time Barnes refinement.
+The 24 tests cover the isolated hold-out selection and deprecated arguments, the exclusion of the CV points from the final pass, the OI analysis error (including the correlation-length estimate), the space-time Barnes refinement and the parameter file reader.
 
 ---
 
 ## Methodological References
 
 * **DINEOF Core Method**: Beckers, J. M., & Rixen, M. (2003). *EOF calculations and data filling from incomplete oceanographic datasets*. J. Atmos. Ocean. Technol., 20(12), 1839-1856.
-* **Geophysical Applications**: Alvera-Azcarate, A., et al. (2005). *Reconstruction of incomplete oceanographic data sets using DINEOF*. Ocean Modelling, 9(4), 325-346.
-* **Error Formulation (OI)**: Beckers, J. M., et al. (2006). *Error calculation on DINEOF data reconstruction using an optimal interpolation approach*. Ocean Science, 2(2), 79-99.
-* **Temporal Filtering**: Alvera-Azcarate, A., et al. (2009). *The use of the temporal filter in DINEOF: analysis of a Gulf of Mexico SST data set*. Ocean Science, 5(4), 475-485.
+* **Geophysical Applications**: Alvera-Azcárate, A., Barth, A., Rixen, M., & Beckers, J. M. (2005). *Reconstruction of incomplete oceanographic data sets using empirical orthogonal functions: application to the Adriatic Sea surface temperature*. Ocean Modelling, 9(4), 325-346.
+* **Error Formulation (OI)**: Beckers, J.-M., Barth, A., & Alvera-Azcárate, A. (2006). *DINEOF reconstruction of clouded images including error maps - application to the Sea-Surface Temperature around Corsican Island*. Ocean Science, 2(2), 183-199.
+* **Temporal Filtering**: Alvera-Azcárate, A., Barth, A., Sirjacobs, D., & Beckers, J.-M. (2009). *Enhancing temporal correlations in EOF expansions for the reconstruction of missing data using DINEOF*. Ocean Science, 5(4), 475-485.
 * **Objective Analysis & Barnes Filter**: Barnes, S. L. (1964). *A technique for maximizing details in numerical weather map analysis*. J. Appl. Meteorol. Climatol., 3(4), 396-409.
 * **Log-Normal Environmental Distributions**: Andersson, A. (2021). *Mechanisms for log-normal concentration distributions in the environment*. Scientific Reports, 11(1), 16418.
 * **Numerical Linear Algebra**: Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed.). Johns Hopkins University Press.

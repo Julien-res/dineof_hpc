@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dineof_hpc.config import load_dine_opts
 from dineof_hpc.core.io_utils import run_reconstruction_pipeline
 
 
@@ -44,39 +45,12 @@ JOBS = [
 
 # -----------------------------------------------------------------------------
 # 2. DINEOF profiles.
-#    Select the profile below. Keep "conservative" for final results and use
-#    "fast" for previews or parameter exploration.
+#    The parameters (nev, alpha, toliter...) live in dineof_params.toml, next to
+#    this script; edit that file, or point DINEOF_CONFIG to your own copy.
+#    Keep "conservative" for final results and use "fast" for previews.
 # -----------------------------------------------------------------------------
 PROFILE = "conservative"
-
-DINE_OPTS = {
-    "conservative": {
-        "nev": None,                 # Estimate the rank from the variance target.
-        "toliter": 0.003,            # Relative convergence tolerance.
-        "nitemax": 300,              # Maximum iterations allowed per EOF mode.
-        "alpha": 0.01,               # Temporal diffusion strength (default).
-        "cv_max_points": 500_000,    # Maximum number of validation points.
-        "cv_patience": 3,            # Modes allowed after the CV minimum.
-        "keep_observations": True,   # Preserve genuine observations exactly.
-        "subsample_ratio": 0.1,     # Use 10% of pixels for covariance estimation.
-        "seed": 42,                  # Make sampling and results reproducible.
-        "verbose": True,             # Print progress and convergence information.
-        "debug": True,               # Include detailed timing information.
-    },
-    "fast": {
-        "nev": 15,                   # Avoid automatic rank estimation.
-        "toliter": 0.01,             # Stop earlier with a looser tolerance.
-        "nitemax": 50,               # Use fewer iterations per EOF mode.
-        "alpha": 0.01,               # Keep the temporal filter unchanged.
-        "cv_max_points": 50_000,     # Evaluate fewer validation points.
-        "cv_patience": 1,            # Stop soon after the CV minimum.
-        "keep_observations": True,   # Preserve genuine observations exactly.
-        "subsample_ratio": 0.1,     # Keep covariance computation compact.
-        "seed": 42,                  # Keep comparisons reproducible.
-        "verbose": True,             # Keep progress visible.
-        "debug": False,              # Skip timing instrumentation overhead.
-    },
-}
+DINE_OPTS = {name: load_dine_opts(profile=name) for name in ("conservative", "fast")}
 
 
 # Optional thread settings. Remove this block if a scheduler configures them.
