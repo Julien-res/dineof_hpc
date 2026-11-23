@@ -1219,8 +1219,8 @@ def dineof(
     popt = 0
     nitedone = np.zeros(nev, dtype=np.uint16)
     cv_pred_out_of_sample = None
-    t0_search = time.perf_counter()    
-    
+    t0_search = time.perf_counter()
+
     for p in range(nev):
         t0_mode = time.perf_counter()
         t_mode_svd = 0.0

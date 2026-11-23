@@ -42,7 +42,9 @@ def load_dine_opts(
     with open(cfg_path, "rb") as fh:
         profiles = tomllib.load(fh)
     if profile not in profiles:
-        raise ValueError(f"Unknown profile {profile!r} in {cfg_path}; available: {sorted(profiles)}")
+        raise ValueError(
+            f"Unknown profile {profile!r} in {cfg_path}; available: {sorted(profiles)}"
+        )
     opts = dict(profiles[profile])
     opts.update(overrides)
     if not opts.get("nev"):

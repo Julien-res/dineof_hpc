@@ -5,7 +5,8 @@ This example is intentionally dataset-agnostic. It expects a NetCDF file with
 one time-varying variable and a compatible NetCDF mask containing a variable
 named ``mask``. Missing observations must be encoded as ``NaN``.
 
-Run this file after editing the paths and options below::
+Run this file after editing the paths below and the parameters in
+``dineof_params.toml``::
 
     python example.py
 

@@ -9,7 +9,7 @@ def test_default_profile_nev_automatic():
     assert opts["alpha"] == 0.01 and opts["cv_patience"] == 3
 
 
-def test_fast_profile_and_override(tmp_path):
+def test_fast_profile_and_override():
     assert load_dine_opts(profile="fast")["nev"] == 15
     assert load_dine_opts(profile="fast", nev=30)["nev"] == 30
 

@@ -743,7 +743,30 @@ def apply_spacetime_refinement(
     Observed values are left untouched. The whole ``(time, lat, lon)`` cube is held in memory
     (a few float32 copies), so memory scales with the full grid size.
 
-    Returns an ``(n_water, n_time)`` array.
+    Parameters
+    ----------
+    X_rec : np.ndarray
+        Reconstruction of shape ``(n_water, n_time)``, in physical units.
+    X_raw_obs : np.ndarray
+        Genuine observations with the same shape as ``X_rec``; ``NaN`` where unobserved.
+    mask_2d : np.ndarray
+        Boolean 2D water mask (``True`` = water) used to rebuild the ``(time, lat, lon)`` cube.
+    sigma_spatial_pixels : float
+        Standard deviation of the Gaussian kernel in space, in pixels.
+    sigma_time_dates : float
+        Standard deviation of the Gaussian kernel along time, in dates.
+    decorrelation_cutoff : float, default=0.05
+        Minimum normalised kernel weight for a correction to be applied; elsewhere the
+        plain reconstruction is kept.
+    is_log_scale : bool, default=False
+        If ``True``, the residual is computed in natural-log space and applied
+        multiplicatively (correction clipped to ``[-3, 3]`` in log units); otherwise it is
+        additive.
+
+    Returns
+    -------
+    np.ndarray
+        Refined reconstruction of shape ``(n_water, n_time)``.
     """
     res, obs = _spacetime_residual(X_rec, X_raw_obs, is_log_scale)
     R = _to_cube(res, mask_2d)
@@ -823,7 +846,26 @@ def fit_quantile_transfer_training(
 
 
 def estimate_pixel_area_km2(lat: np.ndarray, lon: np.ndarray) -> float | None:
-    """Pixel area (km^2) deduced from 1D or 2D coordinates: degrees (|lat| <= 90) or projected metres."""
+    """Estimate the pixel area in km^2 from the grid coordinates.
+
+    The grid step is the median absolute difference between consecutive coordinates.
+    Coordinates are read as geographic degrees when ``|lat| <= 90`` and ``|lon| <= 360``
+    (1 degree of latitude = 111.32 km, longitude step scaled by the cosine of the mean
+    latitude); otherwise they are read as projected coordinates in metres.
+
+    Parameters
+    ----------
+    lat : np.ndarray
+        Latitudes (or northings), 1D of length ``ny`` or 2D of shape ``(ny, nx)``.
+    lon : np.ndarray
+        Longitudes (or eastings), 1D of length ``nx`` or 2D of shape ``(ny, nx)``.
+
+    Returns
+    -------
+    float or None
+        Pixel area in km^2, or ``None`` if the grid has fewer than two points along an
+        axis or a zero step.
+    """
     lat = np.asarray(lat, dtype=np.float64)
     lon = np.asarray(lon, dtype=np.float64)
     if lat.ndim == 2:
@@ -848,7 +890,22 @@ def effective_obs_sigma(sigma_o: float, corr_length_km: float | None, pixel_area
 
     Neighbouring pixels of a satellite image share their error, so the observation error variance entering the
     OI system is inflated by the number of pixels per independent error cell, ``mu2_eff = mu2 * L^2 / (dx dy)``
-    (Beckers et al., 2006). A ``corr_length_km`` of ``None`` or 0, or an unknown pixel size, returns ``sigma_o``.
+    (Beckers et al., 2006).
+
+    Parameters
+    ----------
+    sigma_o : float
+        Observation error standard deviation of independent pixels.
+    corr_length_km : float or None
+        Correlation length ``L`` of the observation error, in km. ``None`` or 0 disables the inflation.
+    pixel_area_km2 : float or None
+        Pixel area ``dx * dy`` in km^2. ``None`` or a non-positive value disables the inflation.
+
+    Returns
+    -------
+    float
+        ``sigma_o`` inflated by ``sqrt(max(L^2 / (dx dy), 1))``; ``sigma_o`` itself when the
+        inflation is disabled.
     """
     if not corr_length_km or not pixel_area_km2 or pixel_area_km2 <= 0:
         return float(sigma_o)
@@ -944,7 +1001,38 @@ def resolve_corr_length_km(
     coords_meta: dict,
     apply_log: bool = True,
 ) -> tuple[float | None, dict | None]:
-    """Turn the user setting into a length in km: ``'auto'`` -> estimated (50 km fallback), a number -> itself, None or 0 -> None."""
+    """Turn the user setting ``corr_length_km`` into a correlation length in km.
+
+    Parameters
+    ----------
+    corr_length_km : float, str or None
+        ``'auto'`` estimates the length with :func:`estimate_error_corr_length_km` (50 km fallback
+        if the estimate fails); a positive number is used as given; ``None`` or 0 disables the
+        correlated-error inflation.
+    dineof_meta : dict
+        Metadata returned by :func:`dineof`.
+    X_obs : np.ndarray
+        Genuine observations of shape ``(n_water, n_time)``, ``NaN`` where unobserved.
+    mask_2d : np.ndarray
+        Boolean 2D water mask.
+    coords_meta : dict
+        Coordinates dictionary; ``'lat'`` and ``'lon'`` are used to get the pixel area.
+    apply_log : bool, default=True
+        Whether the reconstruction was computed in natural-log space.
+
+    Returns
+    -------
+    L_km : float or None
+        Correlation length in km, or ``None`` when disabled.
+    estimate : dict or None
+        Diagnostics of :func:`estimate_error_corr_length_km` when ``'auto'`` was requested,
+        otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``corr_length_km`` is a string other than ``'auto'``.
+    """
     if corr_length_km is None:
         return None, None
     if isinstance(corr_length_km, str):
@@ -1166,7 +1254,44 @@ def export_diagnostics_and_plots(
     temporal_err_mean: np.ndarray,
     n_bins: int = 20
 ):
-    """Write validation CSV reports and a six-panel diagnostic dashboard."""
+    """Write validation CSV reports and a six-panel diagnostic dashboard.
+
+    Three files are written to ``out_dir``: ``Error_Matrix_<var_name>.csv`` (global scores of the
+    cross-validation points and mean OI error), ``Error_Profile_<var_name>.csv`` (RMSE and bias per
+    intensity bin) and ``Dashboard_<var_name>.png`` (scatter plot, error profile, CV curve, maps of
+    the mean OI error, and temporal evolution). Scores are computed in log10 space when
+    ``dineof_meta['apply_log']`` is true, otherwise in linear space.
+
+    Parameters
+    ----------
+    out_dir : str
+        Existing directory receiving the output files.
+    var_name : str
+        Variable name used in file names and plot titles.
+    mask_2d : np.ndarray
+        Cropped boolean 2D water mask (``True`` = water), shape ``(ny, nx)``.
+    coords_meta : dict
+        Coordinates dictionary; ``'units'`` (map title) and ``'time'`` (time axis) are used.
+    truth_cv : np.ndarray
+        Withheld cross-validation observations, in physical units.
+    pred_cv : np.ndarray
+        Out-of-sample predictions at the same points, in physical units.
+    dineof_meta : dict
+        Metadata returned by :func:`dineof`; ``n_opt``, ``valc``, ``varini``, ``varend``,
+        ``var_ratio``, ``sigma_o`` and ``apply_log`` are read.
+    mean_spatial_err : np.ndarray
+        Temporal mean of the OI analysis error per water pixel, shape ``(n_water,)``.
+    mean_spatial_rel : np.ndarray
+        Temporal mean of the relative OI error (P / B) per water pixel, shape ``(n_water,)``.
+    temporal_err_mean : np.ndarray
+        Spatial mean of the OI error for each date, shape ``(n_time,)``.
+    n_bins : int, default=20
+        Number of intensity bins of the error profile; bins with fewer than 5 points are skipped.
+
+    Returns
+    -------
+    None
+    """
     is_log = dineof_meta.get('apply_log', True)
 
     if is_log:
