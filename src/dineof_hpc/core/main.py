@@ -20,6 +20,9 @@ Mathematical & Methodological References:
     - Alvera-Azcarate, A., Barth, A., Sirjacobs, D., & Beckers, J.-M. (2009). Enhancing
       temporal correlations in EOF expansions for the reconstruction of missing data
       using DINEOF. Ocean Science, 5(4), 475-485.
+    - Halko, N., Martinsson, P. G., & Tropp, J. A. (2011). Finding structure with randomness:
+      probabilistic algorithms for constructing approximate matrix decompositions.
+      SIAM Review, 53(2), 217-288.
 """
 
 from __future__ import annotations
@@ -379,7 +382,7 @@ def _ssvd_spectral(
         Eigensolver algorithm:
         - 'dense' : LAPACK syevr with subset_by_index (exact MRRR solver).
         - 'lanczos' : ARPACK restarted Lanczos with warm-start (eigsh).
-        - 'randomized' : Randomized SVD (Halko et al., 2011) on covariance.
+        - 'randomized' : Randomized SVD on covariance (Halko, Martinsson & Tropp, 2011).
 
     Notes
     -----

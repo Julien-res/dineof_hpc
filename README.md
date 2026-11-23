@@ -503,6 +503,7 @@ The 24 tests cover the isolated hold-out selection and deprecated arguments, the
 * **Temporal Filtering**: Alvera-Azcárate, A., Barth, A., Sirjacobs, D., & Beckers, J.-M. (2009). *Enhancing temporal correlations in EOF expansions for the reconstruction of missing data using DINEOF*. Ocean Science, 5(4), 475-485.
 * **Objective Analysis & Barnes Filter**: Barnes, S. L. (1964). *A technique for maximizing details in numerical weather map analysis*. J. Appl. Meteorol. Climatol., 3(4), 396-409.
 * **Log-Normal Environmental Distributions**: Andersson, A. (2021). *Mechanisms for log-normal concentration distributions in the environment*. Scientific Reports, 11(1), 16418.
+* **Randomized SVD**: Halko, N., Martinsson, P. G., & Tropp, J. A. (2011). *Finding structure with randomness: probabilistic algorithms for constructing approximate matrix decompositions*. SIAM Rev., 53(2), 217-288.
 * **Numerical Linear Algebra**: Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed.). Johns Hopkins University Press.
 
 ---
